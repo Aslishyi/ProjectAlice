@@ -1,0 +1,14 @@
+dotenv
+python-dotenv
+pydantic
+httpx
+pillow
+langgraph
+openai
+chromadb
+aiofiles
+mss
+numpy
+rich
+uvicorn
+fastapi
