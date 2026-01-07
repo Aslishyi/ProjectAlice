@@ -2,9 +2,11 @@ import json
 from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import SystemMessage
 from app.core.state import AgentState
 from app.core.config import config
 from app.memory.vector_store import vector_db
+from app.utils.cache import cached_llm_invoke
 
 # ... Prompt 保持不变，篇幅原因省略，请确保保留原文件中的 MEMORY_SYSTEM_PROMPT ...
 MEMORY_SYSTEM_PROMPT = """
@@ -42,10 +44,10 @@ If nothing worth saving, return {{"operations": []}}.
 """
 
 llm = ChatOpenAI(
-    model=config.SMALL_LLM_MODEL_NAME,
+    model=config.SMALL_MODEL,
     temperature=0.0,
-    api_key=config.SILICONFLOW_API_KEY,
-    base_url=config.SILICONFLOW_BASE_URL
+    api_key=config.SMALL_MODEL_API_KEY,
+    base_url=config.SMALL_MODEL_URL
 )
 
 
@@ -79,15 +81,18 @@ async def memory_saver_node(state: AgentState):
 
     try:
         prompt = ChatPromptTemplate.from_template(MEMORY_SYSTEM_PROMPT)
-        chain = prompt | llm
-
-        resp = await chain.ainvoke({
-            "mode": mode,
-            "user_id": real_user_id, # 告诉 LLM ID
-            "user_name": user_nickname, # 告诉 LLM 名字
-            "user_input": user_text,
-            "ai_output": ai_output
-        })
+        
+        # 将链式调用转换为直接调用，以便使用缓存
+        formatted_prompt = prompt.format(
+            mode=mode,
+            user_id=real_user_id,  # 告诉 LLM ID
+            user_name=user_nickname,  # 告诉 LLM 名字
+            user_input=user_text,
+            ai_output=ai_output
+        )
+        
+        # 使用缓存的LLM调用
+        resp = await cached_llm_invoke(llm, [SystemMessage(content=formatted_prompt)], temperature=llm.temperature)
 
         raw_content = resp.content.strip().replace("```json", "").replace("```", "").strip()
         data = json.loads(raw_content)

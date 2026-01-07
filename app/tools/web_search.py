@@ -1,8 +1,8 @@
-from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_tavily import TavilySearch
 from langchain_core.tools import tool
 
 # 初始化 Tavily 客户端
-_search = TavilySearchResults(max_results=5)
+_search = TavilySearch(max_results=5)
 
 @tool
 def perform_web_search(query: str) -> str:

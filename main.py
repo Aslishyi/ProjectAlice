@@ -13,7 +13,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 from app.graph.graph_builder import build_graph
 from app.core.state import AgentState, EmotionData
-from app.utils.safety import safety_filter
+
 from app.memory.relation_db import relation_db
 from app.monitor.screen_monitor import ScreenMonitor
 
@@ -66,12 +66,6 @@ async def main():
                 if not text: continue
                 if text.lower() in ["quit", "exit"]:
                     os._exit(0)
-
-                # 安全检查
-                is_safe, _ = safety_filter.check_input(text)
-                if not is_safe:
-                    console.print("[red]安全拦截[/red]")
-                    continue
 
                 asyncio.run_coroutine_threadsafe(event_queue.put(UserInputEvent(text)), loop)
             except:

@@ -3,12 +3,25 @@
 import json
 import os
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Any, List, Union
+import logging
+import time
+from typing import Dict, Any, List, Union, Optional
 from pydantic import BaseModel, Field
+from sqlalchemy import Column, Integer, String, Text, JSON
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 
-DB_FILE = "data/user_profiles.json"
-_executor = ThreadPoolExecutor(max_workers=1)  # 专门用于文件写入的单线程池
+# 导入数据库配置
+from app.core.database import Base, engine, SessionLocal, init_db
+
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# JSON文件路径（用于数据迁移）
+OLD_JSON_DB = "data/user_profiles.json"
+# 迁移完成标记文件
+MIGRATION_COMPLETE_FILE = "data/migration_complete.txt"
 
 
 class Relationship(BaseModel):
@@ -26,100 +39,229 @@ class UserProfile(BaseModel):
     relationship: Relationship
 
 
+# 数据库模型
+class UserProfileModel(Base):
+    __tablename__ = "user_profiles"
+    
+    qq_id = Column(String(50), primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    relationship_data = Column(JSON, nullable=False)  # 存储Relationship对象的JSON数据
+    updated_at = Column(String(50), default=lambda: str(time.time()))
+
+
 class GlobalRelationDB:
     def __init__(self):
-        self.db_path = DB_FILE
-        self._ensure_db_exists()
-        self.data: Dict[str, Union[Dict, UserProfile]] = self._load_db()
+        # 初始化数据库
+        init_db()
+        
+        # 检查是否需要从JSON迁移数据
+        self._migrate_from_json()
 
-    def _ensure_db_exists(self):
-        os.makedirs("data", exist_ok=True)
-        if not os.path.exists(self.db_path):
-            with open(self.db_path, "w", encoding="utf-8") as f:
-                json.dump({}, f, ensure_ascii=False, indent=2)
-
-    def _load_db(self) -> Dict[str, Any]:
+    def _migrate_from_json(self):
+        """从旧的JSON文件迁移数据到数据库"""
+        # 检查迁移是否已经完成
+        if os.path.exists(MIGRATION_COMPLETE_FILE):
+            logger.info("[RelationDB] 数据迁移已经完成，跳过")
+            return
+            
+        if not os.path.exists(OLD_JSON_DB):
+            logger.info("[RelationDB] 没有发现旧的JSON数据库文件，跳过迁移")
+            # 创建迁移完成标记，避免下次检查
+            try:
+                with open(MIGRATION_COMPLETE_FILE, "w") as f:
+                    f.write("Migration completed at " + time.strftime("%Y-%m-%d %H:%M:%S"))
+            except Exception as e:
+                logger.error(f"[RelationDB] 创建迁移标记文件失败: {str(e)}")
+            return
+            
         try:
-            with open(self.db_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            return {}
-
-    # 🚀 优化点：将保存操作改为非阻塞 (Fire-and-forget)
-    # 实际上为了数据安全，我们可以放到 executor 里跑
-    def _save_db_sync(self):
-        """同步保存逻辑，供 Executor 调用"""
-        try:
-            saveable = {}
-            for uid, profile in self.data.items():
-                if hasattr(profile, "model_dump"):
-                    saveable[uid] = profile.model_dump()
-                else:
-                    saveable[uid] = profile
-
-            # 使用原子写入防止损坏：写临时文件 -> 重命名
-            temp_path = self.db_path + ".tmp"
-            with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(saveable, f, ensure_ascii=False, indent=2)
-            os.replace(temp_path, self.db_path)
+            with open(OLD_JSON_DB, "r", encoding="utf-8") as f:
+                old_data = json.load(f)
+                
+            if not old_data:
+                logger.info("[RelationDB] 旧的JSON数据库文件为空，跳过迁移")
+                return
+                
+            db = SessionLocal()
+            migrated_count = 0
+            
+            try:
+                for user_qq, profile_data in old_data.items():
+                    # 检查用户是否已经存在
+                    existing = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+                    if existing:
+                        continue
+                        
+                    # 构建新的数据库记录
+                    user_profile = UserProfileModel(
+                        qq_id=str(user_qq),
+                        name=profile_data.get("name", f"User_{user_qq}"),
+                        relationship_data=profile_data.get("relationship", {})
+                    )
+                    db.add(user_profile)
+                    migrated_count += 1
+                    
+                db.commit()
+                logger.info(f"[RelationDB] 成功从JSON迁移了 {migrated_count} 条用户数据到数据库")
+                
+            except SQLAlchemyError as e:
+                db.rollback()
+                logger.error(f"[RelationDB] 数据迁移失败: {str(e)}")
+            finally:
+                db.close()
+                
+                # 无论是否迁移数据，都创建迁移完成标记
+                try:
+                    with open(MIGRATION_COMPLETE_FILE, "w") as f:
+                        f.write("Migration completed at " + time.strftime("%Y-%m-%d %H:%M:%S"))
+                except Exception as e:
+                    logger.error(f"[RelationDB] 创建迁移标记文件失败: {str(e)}")
+                
         except Exception as e:
-            print(f"❌ [RelationDB] Save error: {e}")
-
-    def _trigger_save(self):
-        """触发异步保存"""
-        # 获取当前的 event loop，如果在 loop 中则 await run_in_executor
-        try:
-            loop = asyncio.get_running_loop()
-            loop.run_in_executor(_executor, self._save_db_sync)
-        except RuntimeError:
-            # 如果没有 loop (比如初始化时)，同步跑
-            self._save_db_sync()
+            logger.error(f"[RelationDB] 读取旧JSON文件失败: {str(e)}")
+            
+            # 即使读取失败，也创建迁移标记避免重复尝试
+            try:
+                with open(MIGRATION_COMPLETE_FILE, "w") as f:
+                    f.write("Migration completed at " + time.strftime("%Y-%m-%d %H:%M:%S") + " (with errors)")
+            except Exception as create_e:
+                logger.error(f"[RelationDB] 创建迁移标记文件失败: {str(create_e)}")
 
     def get_user_profile(self, user_qq: str, current_name: str = None) -> UserProfile:
         user_qq = str(user_qq)
-        if user_qq in self.data:
-            entry = self.data[user_qq]
-            profile = None
-            if isinstance(entry, dict):
-                if "qq_id" not in entry: entry["qq_id"] = user_qq
-                profile = UserProfile(**entry)
-                self.data[user_qq] = profile
-            elif isinstance(entry, UserProfile):
-                profile = entry
-                if not profile.qq_id: profile.qq_id = user_qq
+        db = SessionLocal()
+        
+        try:
+            # 查询用户
+            db_profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+            
+            if db_profile:
+                # 从数据库记录构建UserProfile对象
+                relationship_data = db_profile.relationship_data
+                if not relationship_data:
+                    relationship_data = {"target_id": user_qq}
+                
+                profile = UserProfile(
+                    name=db_profile.name,
+                    qq_id=db_profile.qq_id,
+                    relationship=Relationship(**relationship_data)
+                )
+                
+                # 更新用户名
+                if current_name and profile.name != current_name:
+                    db_profile.name = current_name
+                    db_profile.updated_at = str(time.time())
+                    db.commit()
+                    profile.name = current_name
+                
+                return profile
             else:
-                profile = UserProfile(name=current_name or f"User_{user_qq}", qq_id=user_qq,
-                                      relationship=Relationship(target_id=user_qq))
-
-            if current_name and profile.name != current_name:
-                profile.name = current_name
-                self.data[user_qq] = profile
-                self._trigger_save()  # 异步保存
-            return profile
-
-        display_name = current_name if current_name else f"User_{user_qq}"
-        new_profile = UserProfile(name=display_name, qq_id=user_qq,
-                                  relationship=Relationship(target_id=user_qq, intimacy=60))
-        self.data[user_qq] = new_profile
-        self._trigger_save()  # 异步保存
-        return new_profile
+                # 创建新用户
+                display_name = current_name if current_name else f"User_{user_qq}"
+                relationship = Relationship(target_id=user_qq)
+                
+                new_db_profile = UserProfileModel(
+                    qq_id=user_qq,
+                    name=display_name,
+                    relationship_data=relationship.model_dump()
+                )
+                
+                db.add(new_db_profile)
+                db.commit()
+                
+                return UserProfile(
+                    name=display_name,
+                    qq_id=user_qq,
+                    relationship=relationship
+                )
+                
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"[RelationDB] 获取用户资料失败: {str(e)}")
+            # 出错时返回默认值
+            display_name = current_name if current_name else f"User_{user_qq}"
+            return UserProfile(
+                name=display_name,
+                qq_id=user_qq,
+                relationship=Relationship(target_id=user_qq)
+            )
+        finally:
+            db.close()
 
     def update_intimacy(self, user_qq: str, delta: int):
-        profile = self.get_user_profile(user_qq)
-        current = profile.relationship.intimacy
-        new_val = max(0, min(100, current + delta))
-        profile.relationship.intimacy = new_val
-        self.data[user_qq] = profile
-        self._trigger_save()  # 异步保存
-        return new_val
+        user_qq = str(user_qq)
+        db = SessionLocal()
+        
+        try:
+            profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+            
+            if profile:
+                relationship_data = profile.relationship_data
+                if not relationship_data:
+                    relationship_data = {"target_id": user_qq, "intimacy": 60}
+                
+                # 更新亲密度
+                current_intimacy = relationship_data.get("intimacy", 60)
+                new_intimacy = max(0, min(100, current_intimacy + delta))
+                relationship_data["intimacy"] = new_intimacy
+                
+                profile.relationship_data = relationship_data
+                profile.updated_at = str(time.time())
+                db.commit()
+                
+                return new_intimacy
+            else:
+                # 用户不存在，创建新用户
+                relationship = Relationship(target_id=user_qq, intimacy=60 + delta)
+                new_profile = UserProfileModel(
+                    qq_id=user_qq,
+                    name=f"User_{user_qq}",
+                    relationship_data=relationship.model_dump()
+                )
+                
+                db.add(new_profile)
+                db.commit()
+                
+                return relationship.intimacy
+                
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"[RelationDB] 更新亲密度失败: {str(e)}")
+            return 60  # 出错时返回默认值
+        finally:
+            db.close()
 
-    # ... (其他 update 方法同理，替换 _save_db 为 _trigger_save) ...
     def update_relationship(self, user_qq: str, target_id: str, new_data: Relationship):
-        profile = self.get_user_profile(user_qq)
-        # ... (逻辑保持不变) ...
-        # ...
-        self.data[user_qq] = profile
-        self._trigger_save()
+        user_qq = str(user_qq)
+        db = SessionLocal()
+        
+        try:
+            profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+            
+            if profile:
+                profile.relationship_data = new_data.model_dump()
+                profile.updated_at = str(time.time())
+                db.commit()
+                return True
+            else:
+                # 用户不存在，创建新用户
+                new_profile = UserProfileModel(
+                    qq_id=user_qq,
+                    name=f"User_{user_qq}",
+                    relationship_data=new_data.model_dump()
+                )
+                
+                db.add(new_profile)
+                db.commit()
+                return True
+                
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"[RelationDB] 更新关系失败: {str(e)}")
+            return False
+        finally:
+            db.close()
 
 
+# 创建全局实例
 relation_db = GlobalRelationDB()

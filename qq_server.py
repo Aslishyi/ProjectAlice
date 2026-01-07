@@ -6,8 +6,9 @@ import uuid
 import logging
 import re
 import time
+import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from langchain_core.messages import HumanMessage, AIMessage
 
 from app.core.global_store import global_store
@@ -16,6 +17,7 @@ from app.memory.relation_db import relation_db
 from app.memory.local_history import LocalHistoryManager
 from app.background.dream import dream_machine
 from app.utils.qq_utils import parse_onebot_array_msg
+
 
 # 配置日志
 logging.basicConfig(
@@ -188,8 +190,19 @@ class QQBotManager:
                             if msg_type == "group" and user_qq and node_name == "agent":
                                 final_send_content = f"[CQ:at,qq={user_qq}] {original_reply}"
 
-                            # Proactive 模式下，如果是群聊，通常不 At 某人，除非是在回复特定图片
-                            # 这里保留简单逻辑，直接发送内容
+                            # 群聊场景下的主动回复优化：
+                            # 1. 通常不@某人，除非是直接针对特定内容的回复
+                            # 2. 保持简洁，避免占屏
+                            # 3. 根据内容判断是否需要更自然的表达
+                            if msg_type == "group":
+                                # 群聊主动回复：避免@，保持自然，融入群体
+                                # 可以在内容前添加一些轻松的表情或语气词，增加自然感
+                                if node_name == "proactive":
+                                    # 主动发起的群聊回复，更加自然随意
+                                    final_send_content = final_send_content
+                                else:
+                                    # 针对特定内容的回复，可以考虑@
+                                    final_send_content = f"[CQ:at,qq={user_qq}] {original_reply}"
 
                             try:
                                 target = int(group_id) if msg_type == "group" else int(user_qq)
@@ -223,68 +236,92 @@ class QQBotManager:
             target_id = group_id if msg_type == "group" else user_qq
             await session_manager.update_activity(session_id, msg_type, target_id, self_id)
 
-            full_text = ""
-            image_urls = []
-            is_mentioned = False
-            processed_reply_ids = set()
-
-            # ... (解析消息部分保持原样) ...
-            for item in raw_messages:
-                t, imgs, reply_id = parse_onebot_array_msg(item.get("message", ""))
-                full_text += t + " "
-                image_urls.extend(imgs)
-                if reply_id and reply_id not in processed_reply_ids:
-                    processed_reply_ids.add(reply_id)
-                    msg_data = await self.call_api(self_id, "get_msg", {"message_id": reply_id})
-                    if msg_data and "data" in msg_data:
-                        ref_msg = msg_data["data"].get("message", "")
-                        ref_text, ref_imgs, _ = parse_onebot_array_msg(ref_msg)
-                        full_text += f"【引用: {ref_text}】\n"
-                        image_urls.extend(ref_imgs)
-                raw_arr = item.get("message", [])
-                if isinstance(raw_arr, list):
-                    for seg in raw_arr:
-                        if seg.get("type") == "at" and str(seg.get("data", {}).get("qq", "")) == self_id:
-                            is_mentioned = True
-
-            full_text = full_text.strip()
-            if not full_text and image_urls: full_text = "[图片]"
-            if "[Mention:" in full_text:
-                full_text = await self.resolve_mentions(full_text, self_id, group_id)
+            # 解析消息批次
+            full_text, image_urls, is_mentioned = await self._parse_message_batch(raw_messages, self_id)
 
             logger.info(f"📦 [Msg] {user_nickname}: {full_text[:50]}... [URLs: {len(image_urls)}]")
 
-            profile = relation_db.get_user_profile(user_qq=user_qq, current_name=user_nickname)
-            history_msgs, history_summary = await LocalHistoryManager.load_state(session_id)
-
-            human_msg = HumanMessage(
-                content=f"[{user_nickname}]: {full_text}",
-                additional_kwargs={"image_urls": image_urls}
+            # 构建输入参数
+            inputs = await self._build_reactive_inputs(
+                session_id=session_id,
+                full_text=full_text,
+                image_urls=image_urls,
+                user_qq=user_qq,
+                user_nickname=user_nickname,
+                msg_type=msg_type,
+                is_mentioned=is_mentioned
             )
 
-            inputs = {
-                "messages": history_msgs + [human_msg],
-                "conversation_summary": history_summary,
-                "visual_input": None,
-                "image_urls": image_urls,
-                "session_id": session_id,
-                "sender_qq": user_qq,
-                "sender_name": user_nickname,
-                "is_group": (msg_type == "group"),
-                "is_mentioned": is_mentioned,
-                "user_profile": profile.model_dump(),
-                "should_reply": False,
-                # 显式关闭 Proactive Mode
-                "is_proactive_mode": False,
-                "global_emotion_snapshot": global_store.get_emotion_snapshot().model_dump(),
-                "psychological_context": {},
-                "current_image_artifact": None,
-                "tool_call": {},
-                "emotion": {"current_mood": "Calm"},
-                "last_interaction_ts": time.time()
-            }
-
             await self.handle_graph_output(inputs, self_id, msg_type, group_id, user_qq)
+
+    async def _parse_message_batch(self, raw_messages: list, self_id: str):
+        """解析消息批次，提取文本、图片URL和是否被提及"""
+        full_text = ""
+        image_urls = []
+        is_mentioned = False
+        processed_reply_ids = set()
+
+        for item in raw_messages:
+            # 解析单条消息
+            t, imgs, reply_id = parse_onebot_array_msg(item.get("message", ""))
+            full_text += t + " "
+            image_urls.extend(imgs)
+
+            # 处理引用消息
+            if reply_id and reply_id not in processed_reply_ids:
+                processed_reply_ids.add(reply_id)
+                msg_data = await self.call_api(self_id, "get_msg", {"message_id": reply_id})
+                if msg_data and "data" in msg_data:
+                    ref_msg = msg_data["data"].get("message", "")
+                    ref_text, ref_imgs, _ = parse_onebot_array_msg(ref_msg)
+                    full_text += f"【引用: {ref_text}】\n"
+                    image_urls.extend(ref_imgs)
+
+            # 检查是否被@
+            raw_arr = item.get("message", [])
+            if isinstance(raw_arr, list):
+                for seg in raw_arr:
+                    if seg.get("type") == "at" and str(seg.get("data", {}).get("qq", "")) == self_id:
+                        is_mentioned = True
+
+        # 清理文本
+        full_text = full_text.strip()
+        if not full_text and image_urls:
+            full_text = "[图片]"
+
+        return full_text, image_urls, is_mentioned
+
+    async def _build_reactive_inputs(self, session_id: str, full_text: str, image_urls: list,
+                                    user_qq: str, user_nickname: str, msg_type: str, is_mentioned: bool):
+        """构建响应式模式的输入参数"""
+        profile = relation_db.get_user_profile(user_qq=user_qq, current_name=user_nickname)
+        history_msgs, history_summary = await LocalHistoryManager.load_state(session_id)
+
+        human_msg = HumanMessage(
+            content=f"[{user_nickname}]: {full_text}",
+            additional_kwargs={"image_urls": image_urls}
+        )
+
+        return {
+            "messages": history_msgs + [human_msg],
+            "conversation_summary": history_summary,
+            "visual_input": None,
+            "image_urls": image_urls,
+            "session_id": session_id,
+            "sender_qq": user_qq,
+            "sender_name": user_nickname,
+            "is_group": (msg_type == "group"),
+            "is_mentioned": is_mentioned,
+            "user_profile": profile.model_dump(),
+            "should_reply": False,
+            "is_proactive_mode": False,
+            "global_emotion_snapshot": global_store.get_emotion_snapshot().model_dump(),
+            "psychological_context": {},
+            "current_image_artifact": None,
+            "tool_call": {},
+            "emotion": {"current_mood": "Calm"},
+            "last_interaction_ts": time.time()
+        }
 
     # --- 核心逻辑 3: 主动触发入口 (Proactive Trigger) ---
     async def run_proactive_check(self):
@@ -303,10 +340,62 @@ class QQBotManager:
                     # Proactive Agent 内部也有 silence 判断，但这里做第一层过滤更省资源
                     silence_duration = time.time() - data["last_active"]
 
-                    # 只有沉默超过一定时间 (例如 5 分钟) 才触发主动思考
-                    # 或者如果想让 Alice 对新图片有反应，可以缩短这个时间，但需要 monitor 配合
-                    if silence_duration < 300:
-                        continue
+                    # 为群聊和私聊设置不同的触发条件
+                    # 群聊场景：需要更长的沉默时间，避免过度活跃
+                    # 私聊场景：可以更频繁地主动互动，增加亲密感
+                    current_hour = time.localtime().tm_hour
+                    current_weekday = time.localtime().tm_wday  # 0-6，0是周一
+                    
+                    if data["type"] == "group":
+                        # 群聊沉默超过10分钟才触发，且只在活跃群里（最近2小时有互动）
+                        # 增加：避免在深夜（23:00-07:00）打扰群聊
+                        # 周末可以适当放宽时间限制，因为大家可能更活跃
+                        is_weekend = current_weekday in [5, 6]  # 周六周日
+                        if is_weekend:
+                            # 周末可以稍微晚一点，早上8点到晚上23点
+                            if (current_hour < 8 or current_hour >= 23):
+                                continue
+                        else:
+                            # 工作日：早上7点到晚上22点
+                            if (current_hour < 7 or current_hour >= 22):
+                                continue
+                        
+                        if (silence_duration < 600 or 
+                            (time.time() - data["last_active"]) > 7200):
+                            continue
+                    else:
+                        # 私聊沉默超过一定时间才触发
+                        # 增加：根据亲密度调整触发频率
+                        # 高亲密度（>70）：5-120分钟
+                        # 中亲密度（30-70）：15-360分钟
+                        # 低亲密度（<30）：30-720分钟
+                        profile = relation_db.get_user_profile(user_qq=data["target_id"])
+                        intimacy = profile.relationship.intimacy if profile else 50
+                        
+                        if intimacy > 70:
+                            min_silence, max_silence = 300, 7200
+                            # 超高亲密度可以适当放宽时间限制
+                            if intimacy > 85:
+                                if (current_hour < 5 or current_hour >= 23):
+                                    continue
+                            else:
+                                if (current_hour < 6 or current_hour >= 23):
+                                    continue
+                        elif intimacy > 30:
+                            min_silence, max_silence = 900, 21600
+                            if (current_hour < 7 or current_hour >= 23):
+                                continue
+                        else:
+                            min_silence, max_silence = 1800, 43200
+                            if (current_hour < 8 or current_hour >= 22):
+                                continue
+                        
+                        # 周末可以适当增加主动互动的频率
+                        if current_weekday in [5, 6]:
+                            min_silence = int(min_silence * 0.7)  # 周末触发更频繁
+                        
+                        if silence_duration < min_silence or silence_duration > max_silence:
+                            continue
 
                     lock = self.get_session_lock(session_id)
                     if lock.locked(): continue  # 正在处理消息，跳过
@@ -389,9 +478,44 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+# --- 全局错误处理 --- 
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """
+    全局异常处理器，捕获所有未处理的异常
+    """
+    logger.error(f"❌ [Global Error] Unhandled exception: {str(exc)} from {request.url}", exc_info=True)
+    # 对于WebSocket连接，不需要返回HTTP响应
+    if "websocket" in request.url.path:
+        return
+    # 对于HTTP请求，返回500错误
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "服务器内部错误，请稍后重试"}
+    )
+
+
 @app.websocket("/ws")
 async def onebot_endpoint(websocket: WebSocket):
-    # ... (保持原样，未修改) ...
+    # 1. 鉴权校验
+    auth_header = websocket.headers.get("authorization", "")
+    # 获取 Bearer 后面的 token
+    token = auth_header.split(" ")[1] if " " in auth_header else auth_header
+    
+    # 从环境变量获取期望的 token
+    expected_token = os.getenv("WEBSOCKET_AUTH_TOKEN", "")
+    
+    # 如果环境变量未设置，使用默认值（仅用于开发环境）
+    if not expected_token:
+        expected_token = "lo[-+]rSg(l?L,cK"
+    
+    if token != expected_token:
+        logger.error(f"❌ WebSocket 鉴权失败，收到 Token: {token}")
+        await websocket.close(code=4003)
+        return
+    
     await websocket.accept()
     self_id = websocket.headers.get("X-Self-ID", "default")
     bot_manager.connections[self_id] = websocket
@@ -424,5 +548,34 @@ async def onebot_endpoint(websocket: WebSocket):
         logger.info(f"❌ Disconnected: {self_id}")
 
 
+import os
+import argparse
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=6199)
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description="ProjectAlice QQ Server")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="服务器主机地址")
+    parser.add_argument("--port", type=int, default=6199, help="服务器端口")
+    parser.add_argument("--workers", type=int, default=None, help="工作进程数，默认根据CPU核心数自动调整")
+    args = parser.parse_args()
+    
+    # 如果未指定工作进程数，根据CPU核心数自动调整
+    if args.workers is None:
+        # 获取CPU核心数
+        import multiprocessing
+        cpu_count = multiprocessing.cpu_count()
+        # 根据CPU核心数设置合适的工作进程数
+        args.workers = min(cpu_count * 2, 8)  # 最多8个进程
+    
+    print(f"🚀 启动ProjectAlice服务器 [多进程模式: {args.workers}个进程]")
+    print(f"📡 监听地址: http://{args.host}:{args.port}")
+    
+    # 启动Uvicorn服务器，使用多进程模式
+    # 需要将应用程序作为导入字符串传递才能启用多进程
+    uvicorn.run(
+        "qq_server:app",
+        host=args.host,
+        port=args.port,
+        workers=args.workers,
+        log_level="info"
+    )

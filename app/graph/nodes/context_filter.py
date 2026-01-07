@@ -88,8 +88,9 @@ If the message is NOT blocked by Step 1, Alice should reply to maintain the conv
 **DEFAULT DECISION: FALSE (Do NOT reply)**.
 Alice should stay quiet to avoid spamming. **Return TRUE** ONLY if:
 1.  **Explicit Mention**: `Is Mentioned` is true.
-2.  **Explicit Question**: The user asks a clear question Alice is uniquely qualified to answer.
-3.  **Active Engagement**: The user is replying *directly* to Alice's previous statement.
+2.  **Name Reference**: The message content explicitly mentions "Alice" (e.g., "Alice，你今天下午做了什么呀？").
+3.  **Explicit Question**: The user asks a clear question Alice is uniquely qualified to answer.
+4.  **Active Engagement**: The user is replying *directly* to Alice's previous statement.
 
 ### Output Format
 Return a JSON object with a "reasoning" field and a "should_reply" boolean.
@@ -97,11 +98,81 @@ Return a JSON object with a "reasoning" field and a "should_reply" boolean.
 """
 
 llm = ChatOpenAI(
-    model=config.SMALL_LLM_MODEL_NAME,  # 建议统一使用 config.MODEL_NAME 或确认 config.MIMO_MODEL 存在
+    model=config.SMALL_MODEL,  # 建议统一使用 config.MODEL_NAME 或确认 config.MIMO_MODEL 存在
     temperature=0.0,
-    api_key=config.SILICONFLOW_API_KEY,  # 建议统一配置
-    base_url=config.SILICONFLOW_BASE_URL
+    api_key=config.SMALL_MODEL_API_KEY,  # 建议统一配置
+    base_url=config.SMALL_MODEL_URL
 )
+
+
+def _extract_last_message_content(msgs: list) -> str:
+    """
+    从消息列表中提取最后一条消息的文本内容
+    """
+    if not msgs:
+        return ""
+    
+    last_msg = msgs[-1]
+    if isinstance(last_msg.content, list):
+        return next((x['text'] for x in last_msg.content if x.get('type') == 'text'), "")
+    else:
+        return str(last_msg.content).strip()
+
+
+def _check_has_image(state: AgentState, last_content: str) -> bool:
+    """
+    检查消息是否包含图片
+    """
+    image_urls = state.get("image_urls", [])
+    return bool(image_urls or "[图片]" in last_content)
+
+
+def _build_context_history(msgs: list) -> str:
+    """
+    构建上下文历史字符串
+    """
+    recent_msgs = msgs[-3:]
+    history_str = ""
+    
+    for i, m in enumerate(recent_msgs):
+        role = "AI(Alice)" if isinstance(m, (SystemMessage, dict)) or m.type == "ai" else "User"
+        content = m.content
+        
+        if isinstance(content, list):
+            text_part = next((x['text'] for x in content if x.get('type') == 'text'), "")
+            if not text_part:
+                text_part = "[Image/RichMedia]"
+            content = text_part
+
+        # 截断过长消息防止 Prompt 爆炸
+        content_str = str(content)
+        if len(content_str) > 100:
+            content_str = content_str[:100] + "..."
+
+        prefix = ">> [LATEST MSG] " if i == len(recent_msgs) - 1 else ""
+        history_str += f"{prefix}[{role}]: {content_str}\n"
+    
+    return history_str
+
+
+def _apply_heuristic_pre_filter(state: AgentState, last_content: str, has_img: bool) -> dict or None:
+    """
+    应用启发式预过滤规则
+    """
+    is_group = state.get("is_group", False)
+    current_ts = time.time()
+    
+    # 如果没有图片，且文本长度极短且非问句
+    if not has_img and len(last_content) < 2 and last_content not in ["?", "？", "hi", "Hi"]:
+        # 私聊时，如果太短可能也需要回（比如"?"），这里主要针对群聊噪音
+        if is_group:
+            return {
+                "should_reply": False,
+                "filter_reason": "Message too short/Noise (Heuristic)",
+                "last_interaction_ts": current_ts
+            }
+    
+    return None
 
 
 async def context_filter_node(state: AgentState):
@@ -122,55 +193,23 @@ async def context_filter_node(state: AgentState):
     if not msgs:
         return {"should_reply": False, "filter_reason": "No messages"}
 
-    last_msg = msgs[-1]
-    last_content = ""
-    # 兼容多模态消息提取
-    if isinstance(last_msg.content, list):
-        last_content = next((x['text'] for x in last_msg.content if x.get('type') == 'text'), "")
-    else:
-        last_content = str(last_msg.content).strip()
-
+    # 提取最后一条消息的内容
+    last_content = _extract_last_message_content(msgs)
+    
     # 检查是否有图片
-    has_img = False
-    image_urls = state.get("image_urls", [])
-    if image_urls or "[图片]" in last_content:
-        has_img = True
+    has_img = _check_has_image(state, last_content)
+    
+    # 2. 应用启发式预过滤
+    pre_filter_result = _apply_heuristic_pre_filter(state, last_content, has_img)
+    if pre_filter_result:
+        return pre_filter_result
 
-    # 2. 启发式预过滤 (Heuristic Pre-filter)
-    # 如果没有图片，且文本长度极短且非问句
-    if not has_img and len(last_content) < 2 and last_content not in ["?", "？", "hi", "Hi"]:
-        # 私聊时，如果太短可能也需要回（比如"?"），这里主要针对群聊噪音
-        if is_group:
-            return {
-                "should_reply": False,
-                "filter_reason": "Message too short/Noise (Heuristic)",
-                "last_interaction_ts": current_ts
-            }
-
-    # ==============================================================================
-    # 上下文构建
-    # ==============================================================================
-    recent_msgs = msgs[-3:]
-    history_str = ""
-    for i, m in enumerate(recent_msgs):
-        role = "AI(Alice)" if isinstance(m, (SystemMessage, dict)) or m.type == "ai" else "User"
-        content = m.content
-        if isinstance(content, list):
-            text_part = next((x['text'] for x in content if x.get('type') == 'text'), "")
-            if not text_part: text_part = "[Image/RichMedia]"
-            content = text_part
-
-        # 简单截断过长消息防止 Prompt 爆炸
-        content_str = str(content)
-        if len(content_str) > 100: content_str = content_str[:100] + "..."
-
-        prefix = ">> [LATEST MSG] " if i == len(recent_msgs) - 1 else ""
-        history_str += f"{prefix}[{role}]: {content_str}\n"
-
+    # 3. 构建上下文历史
+    history_str = _build_context_history(msgs)
     chat_mode = "GROUP CHAT" if is_group else "PRIVATE CHAT (1-on-1)"
 
     try:
-        # 填充 Prompt
+        # 4. 填充并调用LLM
         prompt = FILTER_PROMPT.format(
             chat_mode=chat_mode,
             context_history=history_str,
@@ -181,9 +220,13 @@ async def context_filter_node(state: AgentState):
         )
 
         resp = await llm.ainvoke([SystemMessage(content=prompt)])
-        raw_content = resp.content.strip()
+        # 处理resp可能是字符串的情况
+        if isinstance(resp, str):
+            raw_content = resp.strip()
+        else:
+            raw_content = resp.content.strip()
 
-        # 🚀 使用增强的解析器
+        # 5. 使用增强的解析器解析结果
         data = _clean_and_parse_json(raw_content)
 
         if data:

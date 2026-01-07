@@ -11,10 +11,10 @@ from app.core.global_store import global_store
 from app.memory.relation_db import relation_db
 
 llm = ChatOpenAI(
-    model=config.SMALL_LLM_MODEL_NAME,
+    model=config.SMALL_MODEL,
     temperature=0.3,
-    api_key=config.SILICONFLOW_API_KEY,
-    base_url=config.SILICONFLOW_BASE_URL
+    api_key=config.SMALL_MODEL_API_KEY,
+    base_url=config.SMALL_MODEL_URL
 )
 
 
@@ -42,8 +42,12 @@ async def psychology_node(state: AgentState):
     rel_desc = "普通路人"
     if rel.intimacy < 20:
         rel_desc = "讨厌的人"
+    elif rel.intimacy >= 40:
+        rel_desc = "普通的朋友"
     elif rel.intimacy >= 60:
         rel_desc = "值得信赖的朋友"
+    elif rel.intimacy >= 90:
+        rel_desc = "最亲密的朋友"
 
     # 4. 构造 Prompt
     prompt = PSYCHOLOGY_ANALYSIS_PROMPT.format(

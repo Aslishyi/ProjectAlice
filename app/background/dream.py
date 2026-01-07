@@ -10,6 +10,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from app.core.config import config
 from app.memory.vector_store import vector_db
 from app.core.global_store import global_store
+from app.utils.cache import cached_llm_invoke
 
 logger = logging.getLogger("DreamCycle")
 
@@ -47,8 +48,8 @@ class DreamCycle:
         self.llm = ChatOpenAI(
             model=config.MODEL_NAME,
             temperature=0.1,
-            api_key=config.SILICONFLOW_API_KEY,
-            base_url=config.SILICONFLOW_BASE_URL
+            api_key=config.MODEL_API_KEY,
+            base_url=config.MODEL_URL
         )
 
     async def start(self):
@@ -193,7 +194,7 @@ class DreamCycle:
             logger.info(f"🧠 [Dream] Attempting to consolidate {len(batch)} fragments...")
 
             prompt = CONSOLIDATION_PROMPT.format(fragments=fragments_text)
-            response = await self.llm.ainvoke([SystemMessage(content=prompt)])
+            response = await cached_llm_invoke(self.llm, [SystemMessage(content=prompt)], temperature=self.llm.temperature)
             result_text = response.content.strip()
 
             # 4. 处理结果

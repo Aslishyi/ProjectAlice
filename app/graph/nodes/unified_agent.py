@@ -9,12 +9,13 @@ from app.core.state import AgentState
 from app.core.config import config
 from app.memory.vector_store import vector_db
 from app.core.prompts import ALICE_CORE_PERSONA, AGENT_SYSTEM_PROMPT
+from app.utils.cache import cached_llm_invoke
 
 llm = ChatOpenAI(
     model=config.MODEL_NAME,
     temperature=0.7,
-    api_key=config.SILICONFLOW_API_KEY,
-    base_url=config.SILICONFLOW_BASE_URL
+    api_key=config.MODEL_API_KEY,
+    base_url=config.MODEL_URL
 )
 
 
@@ -187,8 +188,12 @@ async def agent_node(state: AgentState):
     # 调用 LLM
     parsed = {"action": "reply", "response": "..."}
     try:
-        response = await llm.ainvoke(input_messages)
-        content = response.content.strip()
+        response = await cached_llm_invoke(llm, input_messages, temperature=llm.temperature)
+        # 处理response可能是字符串的情况
+        if isinstance(response, str):
+            content = response.strip()
+        else:
+            content = response.content.strip()
 
         parsed_result = robust_json_parse(content)
 

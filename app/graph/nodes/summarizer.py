@@ -22,10 +22,10 @@ Output ONLY the updated summary text.
 """
 
 llm = ChatOpenAI(
-    model=config.SMALL_LLM_MODEL_NAME,
+    model=config.SMALL_MODEL,
     temperature=0.1,
-    api_key=config.SILICONFLOW_API_KEY,
-    base_url=config.SILICONFLOW_BASE_URL
+    api_key=config.SMALL_MODEL_API_KEY,
+    base_url=config.SMALL_MODEL_URL
 )
 
 
