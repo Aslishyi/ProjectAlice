@@ -506,13 +506,9 @@ async def onebot_endpoint(websocket: WebSocket):
     
     # 从环境变量获取期望的 token
     expected_token = os.getenv("WEBSOCKET_AUTH_TOKEN", "")
-    
-    # 如果环境变量未设置，使用默认值（仅用于开发环境）
-    if not expected_token:
-        expected_token = "lo[-+]rSg(l?L,cK"
-    
-    if token != expected_token:
-        logger.error(f"❌ WebSocket 鉴权失败，收到 Token: {token}")
+
+    if expected_token and token != expected_token:
+        logger.error(f"❌ WebSocket 鉴权失败...")
         await websocket.close(code=4003)
         return
     

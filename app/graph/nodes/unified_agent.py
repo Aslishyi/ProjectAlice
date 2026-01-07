@@ -208,9 +208,13 @@ async def agent_node(state: AgentState):
 
     # 构造返回
     ai_msg = AIMessage(content=parsed.get("response", "..."))
+    # 根据是否需要调用工具设置next_step
+    action = parsed.get("action", "reply")
+    next_step = "tool" if action in ["web_search", "generate_image", "run_python_analysis"] else "save"
+    
     return {
         "messages": msgs + [ai_msg],
-        "next_step": "save",
-        "tool_call": {} if parsed.get("action") == "reply" else {"name": parsed.get("action"),
-                                                                 "args": parsed.get("args")}
+        "next_step": next_step,
+        "tool_call": {} if action == "reply" else {"name": action,
+                                                   "args": parsed.get("args")}
     }

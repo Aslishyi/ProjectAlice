@@ -26,14 +26,36 @@ class Config:
     TEMPERATURE = 0.7
 
     # vision_router context_filter memory_saver psychology summarizer
-    SMALL_MODEL_API_KEY = MIMO_API_KEY
-    SMALL_MODEL_URL = MIMO_BASE_URL
-    SMALL_MODEL = MIMO_MODEL
+    SMALL_PROVIDER = "mimo"
+    PROVIDER = "siliconflow"
+    # mimo
+    # aizex
+    if SMALL_PROVIDER == "aizex":
+        SMALL_MODEL_API_KEY = AIZEX_API_KEY
+        SMALL_MODEL_URL = AIZEX_URL
+        SMALL_MODEL = AIZEX_MODEL
+    elif SMALL_PROVIDER == "siliconflow":
+        SMALL_MODEL_API_KEY = SILICONFLOW_API_KEY
+        SMALL_MODEL_URL = SILICONFLOW_BASE_URL
+        SMALL_MODEL = SMALL_LLM_MODEL_NAME
+    elif SMALL_PROVIDER == "mimo":
+        SMALL_MODEL_API_KEY = MIMO_API_KEY
+        SMALL_MODEL_URL = MIMO_BASE_URL
+        SMALL_MODEL = MIMO_MODEL
 
     # dream proactive_agent unified_agent
-    MODEL_API_KEY = SILICONFLOW_API_KEY
-    MODEL_URL = SILICONFLOW_BASE_URL
-    MODEL_NAME = LLM_MODEL_NAME
+    if PROVIDER == "aizex":
+        MODEL_API_KEY = AIZEX_API_KEY
+        MODEL_URL = AIZEX_URL
+        MODEL_NAME = AIZEX_MODEL
+    elif PROVIDER == "siliconflow":
+        MODEL_API_KEY = SILICONFLOW_API_KEY
+        MODEL_URL = SILICONFLOW_BASE_URL
+        MODEL_NAME = LLM_MODEL_NAME
+    elif PROVIDER == "mimo":
+        MODEL_API_KEY = MIMO_API_KEY
+        MODEL_URL = MIMO_BASE_URL
+        MODEL_NAME = MIMO_MODEL
 
     # --- Vector DB Settings ---
     VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH", "./chroma_db")

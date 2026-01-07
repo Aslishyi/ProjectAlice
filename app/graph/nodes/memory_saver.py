@@ -6,6 +6,7 @@ from langchain_core.messages import SystemMessage
 from app.core.state import AgentState
 from app.core.config import config
 from app.memory.vector_store import vector_db
+from app.memory.combined_memory import combined_memory
 from app.utils.cache import cached_llm_invoke
 
 # ... Prompt 保持不变，篇幅原因省略，请确保保留原文件中的 MEMORY_SYSTEM_PROMPT ...
@@ -14,19 +15,21 @@ You are the Memory Manager for an AI Agent.
 Your goal is to extract structured memory operations from the conversation.
 
 **Current Mode:** {mode}
-(Mode "INTERACTIVE": AI replied. Save normal interactions.)
-(Mode "OBSERVATION": AI stayed silent. **ONLY** save critical facts about the user. IGNORE chit-chat, greetings, or fleeting comments.)
+(Mode "INTERACTIVE": AI replied. Extract facts **only from the user's input**.)
+(Mode "OBSERVATION": AI stayed silent. Extract facts **only from the user's input**.)
 
 **Input Context:**
 User: {user_name} (ID: {user_id})
 User Input: "{user_input}"
-AI Response: "{ai_output}"
+AI Response: "{ai_output}"  (DO NOT extract facts from the AI's response!)
 
 **Extraction Rules:**
 1. **Unify Identity**: Always associate facts with User ID {user_id}.
 2. **Fact vs. Noise**: 
-   - "I bought a PS5" -> SAVE (Fact).
-   - "Lol" / "Weather is nice" -> IGNORE.
+   - "I bought a PS5" -> SAVE (Fact about the user).
+   - "Lol" / "Weather is nice" -> IGNORE (trivial).
+   - **NEVER** extract facts from the AI's response.
+   - Focus only on what the user has said about themselves, their life, preferences, etc.
    - (In OBSERVATION mode): ONLY save if the user reveals permanent personal info or clear preferences.
 
 **Output JSON Format:**
@@ -109,7 +112,23 @@ async def memory_saver_node(state: AgentState):
             category = op.get("category", "event")
             importance = op.get("importance", 1)
 
-            if mode == "OBSERVATION" and importance < 3:
+            # 增强的重要性判断逻辑
+            # 1. 检查是否包含明确的指令性词汇
+            instruction_keywords = ["需要记住", "请记住", "重要", "关键", "一定要", "务必", "牢记"]
+            has_instruction = any(keyword in content for keyword in instruction_keywords)
+            has_instruction_in_input = any(keyword in user_text for keyword in instruction_keywords)
+            
+            # 2. 如果有明确指令，强制提高重要性
+            if has_instruction or has_instruction_in_input:
+                importance = max(importance, 5)  # 最高重要性
+            
+            # 3. 过滤不重要的信息
+            # 在任何模式下，重要性低于2的信息都不存储
+            if importance < 2:
+                continue
+                
+            # 4. 在OBSERVATION模式下，需要更高的重要性
+            if mode == "OBSERVATION" and importance < 4:
                 continue
 
             if action == "add":
@@ -125,10 +144,17 @@ async def memory_saver_node(state: AgentState):
                     "category": category
                 })
 
-                print(f"[{ts}] 🧠 [Memory] Saved ({mode}): {content} (ID: {real_user_id})")
+                print(f"[{ts}] 🧠 [Memory] Saved ({mode}): {content} (ID: {real_user_id}, Importance: {importance})")
 
         if facts_to_add:
             vector_db.add_texts(facts_to_add, metadatas_to_add)
+            
+            # 同时更新组合内存管理器
+            try:
+                combined_memory.update_memory(user_text, ai_output, real_user_id, user_nickname)
+                print(f"[{ts}] 🧠 [CombinedMemory] Updated memories for user {real_user_id}")
+            except Exception as e:
+                print(f"[{ts}] ❌ [CombinedMemory] Failed to update: {e}")
 
     except Exception as e:
         print(f"[{ts}] ❌ [Memory Error] {e}")

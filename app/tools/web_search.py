@@ -1,8 +1,17 @@
 from langchain_tavily import TavilySearch
 from langchain_core.tools import tool
+from app.core.config import config
+import os
+from dotenv import load_dotenv
 
-# 初始化 Tavily 客户端
-_search = TavilySearch(max_results=5)
+# 加载环境变量
+load_dotenv()
+
+# 初始化 Tavily 客户端，确保使用正确的 API Key
+_search = TavilySearch(
+    api_key=os.getenv("TAVILY_API_KEY"),
+    max_results=5
+)
 
 @tool
 def perform_web_search(query: str) -> str:
