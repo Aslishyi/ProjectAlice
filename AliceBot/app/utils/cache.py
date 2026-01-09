@@ -3,14 +3,19 @@ import hashlib
 import json
 import logging
 import msgpack
+import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Union, Deque
 from collections import deque, OrderedDict
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage
 
 # 配置日志
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# 获取AliceBot根目录
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+cache_dir = os.path.join(BASE_DIR, "cache")
+os.makedirs(cache_dir, exist_ok=True)
 
 
 class LLMCache:
@@ -490,12 +495,33 @@ class LLMRequestQueue:
 llm_cache = LLMCache(
     max_size=500, 
     default_ttl=7200,  # 缓存500条，默认过期时间2小时
-    persist_file="./cache/llm_cache.msgpack",  # 缓存持久化文件路径
+    persist_file=os.path.join(cache_dir, "llm_cache.msgpack"),  # 缓存持久化文件路径
     persist_interval=60  # 每分钟自动持久化一次
 )
 
+# 用户信息缓存
+user_cache = LLMCache(
+    max_size=1000, 
+    default_ttl=86400,  # 缓存1000个用户信息，默认过期时间1天
+    persist_file=os.path.join(cache_dir, "user_cache.msgpack")
+)
+
+# 上下文缓存
+context_cache = LLMCache(
+    max_size=1000, 
+    default_ttl=1800,  # 缓存1000个上下文，默认过期时间30分钟
+    persist_file=os.path.join(cache_dir, "context_cache.msgpack")
+)
+
+# 工具调用结果缓存
+tool_cache = LLMCache(
+    max_size=2000, 
+    default_ttl=3600,  # 缓存2000个工具调用结果，默认过期时间1小时
+    persist_file=os.path.join(cache_dir, "tool_cache.msgpack")
+)
+
 # 全局请求队列实例
-llm_queue = LLMRequestQueue(max_concurrent=3, timeout=60)  # 最大3个并发请求，超时60秒
+llm_queue = LLMRequestQueue(max_concurrent=5, timeout=60)  # 增加并发数到5，提高并行处理能力
 
 
 async def cached_llm_invoke(llm: Any, messages: List[BaseMessage], temperature: float = 0.7, max_retries: int = 2) -> Any:
@@ -562,3 +588,147 @@ async def cached_llm_invoke(llm: Any, messages: List[BaseMessage], temperature: 
     # 所有重试都失败
     logger.error(f"LLM调用在{max_retries+1}次尝试后失败: {str(last_exception)}")
     raise last_exception
+
+
+async def cached_user_info_get(user_qq: str) -> Optional[Any]:
+    """
+    从缓存获取用户信息
+    
+    Args:
+        user_qq: 用户QQ号
+        
+    Returns:
+        用户信息，如果缓存未命中则返回None
+    """
+    result = await user_cache.get([HumanMessage(content=f"user_info:{user_qq}")], "user_info", 0.0)
+    return result
+
+
+async def cached_user_info_set(user_qq: str, user_info: Any, ttl: Optional[int] = None) -> None:
+    """
+    将用户信息存入缓存
+    
+    Args:
+        user_qq: 用户QQ号
+        user_info: 用户信息
+        ttl: 缓存过期时间（秒），如果为None则使用默认值
+    """
+    await user_cache.set([HumanMessage(content=f"user_info:{user_qq}")], "user_info", 0.0, user_info, ttl)
+
+
+async def cached_context_get(context_key: str) -> Optional[Any]:
+    """
+    从缓存获取上下文信息
+    
+    Args:
+        context_key: 上下文键
+        
+    Returns:
+        上下文信息，如果缓存未命中则返回None
+    """
+    result = await context_cache.get([HumanMessage(content=f"context:{context_key}")], "context", 0.0)
+    return result
+
+
+async def cached_context_set(context_key: str, context_data: Any, ttl: Optional[int] = None) -> None:
+    """
+    将上下文信息存入缓存
+    
+    Args:
+        context_key: 上下文键
+        context_data: 上下文数据
+        ttl: 缓存过期时间（秒），如果为None则使用默认值
+    """
+    await context_cache.set([HumanMessage(content=f"context:{context_key}")], "context", 0.0, context_data, ttl)
+
+
+async def cached_tool_result_get(tool_name: str, tool_args: dict) -> Optional[Any]:
+    """
+    从缓存获取工具调用结果
+    
+    Args:
+        tool_name: 工具名称
+        tool_args: 工具调用参数
+        
+    Returns:
+        工具调用结果，如果缓存未命中则返回None
+    """
+    from langchain_core.messages import SystemMessage, HumanMessage
+    
+    cache_key_messages = [
+        SystemMessage(content=f"tool:{tool_name}"),
+        HumanMessage(content=json.dumps(tool_args, sort_keys=True))
+    ]
+    
+    result = await tool_cache.get(cache_key_messages, "tool", 0.0)
+    return result
+
+
+async def cached_tool_result_set(tool_name: str, tool_args: dict, result: Any, ttl: Optional[int] = None) -> None:
+    """
+    将工具调用结果存入缓存
+    
+    Args:
+        tool_name: 工具名称
+        tool_args: 工具调用参数
+        result: 工具调用结果
+        ttl: 缓存过期时间（秒），如果为None则使用默认值
+    """
+    from langchain_core.messages import SystemMessage, HumanMessage
+    
+    cache_key_messages = [
+        SystemMessage(content=f"tool:{tool_name}"),
+        HumanMessage(content=json.dumps(tool_args, sort_keys=True))
+    ]
+    
+    await tool_cache.set(cache_key_messages, "tool", 0.0, result, ttl)
+
+
+# 嵌入向量缓存
+embedding_cache = LLMCache(
+    max_size=5000, 
+    default_ttl=86400,  # 缓存5000个嵌入向量，默认过期时间1天
+    persist_file=os.path.join(cache_dir, "embedding_cache.msgpack")
+)
+
+
+async def cached_embedding_get(text: str, model: str) -> Optional[List[float]]:
+    """
+    从缓存获取文本的嵌入向量
+    
+    Args:
+        text: 要获取嵌入向量的文本
+        model: 使用的嵌入模型名称
+        
+    Returns:
+        嵌入向量，如果缓存未命中则返回None
+    """
+    from langchain_core.messages import SystemMessage, HumanMessage
+    
+    cache_key_messages = [
+        SystemMessage(content=f"embedding:{model}"),
+        HumanMessage(content=text)
+    ]
+    
+    result = await embedding_cache.get(cache_key_messages, "embedding", 0.0)
+    return result
+
+
+async def cached_embedding_set(text: str, model: str, embedding: List[float], ttl: Optional[int] = None) -> None:
+    """
+    将文本的嵌入向量存入缓存
+    
+    Args:
+        text: 要缓存嵌入向量的文本
+        model: 使用的嵌入模型名称
+        embedding: 嵌入向量
+        ttl: 缓存过期时间（秒），如果为None则使用默认值
+    """
+    from langchain_core.messages import SystemMessage, HumanMessage
+    
+    cache_key_messages = [
+        SystemMessage(content=f"embedding:{model}"),
+        HumanMessage(content=text)
+    ]
+    
+    await embedding_cache.set(cache_key_messages, "embedding", 0.0, embedding, ttl)

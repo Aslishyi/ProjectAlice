@@ -2,14 +2,19 @@ import json
 import re
 import time
 import random
+import logging
 from datetime import datetime
 from langchain_openai import ChatOpenAI
+
+# 配置日志
+logger = logging.getLogger("UnifiedAgent")
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from app.core.state import AgentState
 from app.core.config import config
 from app.memory.vector_store import vector_db
+from app.memory.relation_db import relation_db
 from app.core.prompts import ALICE_CORE_PERSONA, AGENT_SYSTEM_PROMPT
-from app.utils.cache import cached_llm_invoke
+from app.utils.cache import cached_llm_invoke, cached_user_info_get, cached_user_info_set
 
 llm = ChatOpenAI(
     model=config.MODEL_NAME,
@@ -51,7 +56,7 @@ def robust_json_parse(text: str) -> dict:
 
 async def agent_node(state: AgentState):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}]--- [Alice Core] Processing... ---")
+    logger.info(f"[{ts}]--- [Alice Core] Processing... ---")
 
     msgs = state.get("messages", [])
     image_data = state.get("current_image_artifact")
@@ -83,17 +88,16 @@ async def agent_node(state: AgentState):
 
         clean_text = temp_text.replace("[图片]", "").replace("[表情]", "").replace(" ", "").strip()
 
-        print(
-            f"[{ts}]🕵️ [Debug] Sticker Check -> Raw: '{last_human_content}' | Removed Prefix: '{temp_text}' | Final Cleaned: '{clean_text}'")
+        logger.debug(f"[{ts}]🕵️ [Debug] Sticker Check -> Raw: '{last_human_content}' | Removed Prefix: '{temp_text}' | Final Cleaned: '{clean_text}'")
 
         if len(clean_text) < 2:
-            print(f"[{ts}] 🛑 [Alice Core] Detected PURE STICKER. Skipping LLM.")
+            logger.info(f"[{ts}] 🛑 [Alice Core] Detected PURE STICKER. Skipping LLM.")
 
             # 50% 概率回复表情
             if random.random() < 0.6:
                 replies = ["🐶", "🐱", "💖", "💕", "💝", "🤗", "👻", "👽"]
                 reply = random.choice(replies)
-                print(f"[{ts}]🎲 [Short-Circuit] Reply: {reply}")
+                logger.info(f"[{ts}]🎲 [Short-Circuit] Reply: {reply}")
                 return {
                     "internal_monologue": "Sticker acknowledged.",
                     "messages": msgs + [AIMessage(content=reply)],
@@ -101,7 +105,7 @@ async def agent_node(state: AgentState):
                     "next_step": "save"
                 }
             else:
-                print(f"[{ts}] 🤐 [Short-Circuit] Silent.")
+                logger.info(f"[{ts}] 🤐 [Short-Circuit] Silent.")
                 return {
                     "internal_monologue": "Sticker ignored.",
                     "messages": msgs,
@@ -124,11 +128,12 @@ async def agent_node(state: AgentState):
         # 只有清洗后的文本足够长才检索，避免用 "[图片]" 检索
         query_text = re.sub(r"^\[.*?\]:\s*", "", last_human_content).replace("[图片]", "").strip()
         if len(query_text) > 4:
-            docs = vector_db.search(query_text, k=3)
+            docs = await vector_db.search(query_text, k=3)
             if docs:
-                print(f"[{ts}] 📖 [RAG] Hit: {[d[:20] + '...' for d in docs]}")
+                logger.info(f"[{ts}] 📖 [RAG] Hit: {[d[:20] + '...' for d in docs]}")
                 memory_context = f"【相关回忆】\n" + "\n".join(docs)
-    except Exception:
+    except Exception as e:
+        logger.error(f"[{ts}] [RAG Error] {e}")
         pass
 
     # 视觉摘要
@@ -150,15 +155,66 @@ async def agent_node(state: AgentState):
         }
     """
 
+    # 获取情绪和关系数据
+    emotion_snapshot = state.get("global_emotion_snapshot", {})
+    primary_emotion = psych_ctx.get("primary_emotion", emotion_snapshot.get("primary_emotion", "平淡"))
+    secondary_emotion = psych_ctx.get("secondary_emotion", emotion_snapshot.get("secondary_emotion", ""))
+    valence = emotion_snapshot.get("valence", 0.0)
+    arousal = emotion_snapshot.get("arousal", 0.0)
+    stress = emotion_snapshot.get("stress", 0.0)
+    fatigue = emotion_snapshot.get("fatigue", 0.0)
+    intimacy = psych_ctx.get("current_intimacy", 30)
+    familiarity = psych_ctx.get("current_familiarity", 50)
+    trust = psych_ctx.get("current_trust", 50)
+    interest_match = psych_ctx.get("current_interest_match", 50)
+    
+    # 生成关系描述
+    if intimacy < 20:
+        relation_desc = "陌生人"
+    elif intimacy < 40:
+        relation_desc = "认识的人"
+    elif intimacy < 60:
+        if familiarity > 70:
+            relation_desc = "熟悉的朋友"
+        elif trust > 70:
+            relation_desc = "值得信任的朋友"
+        else:
+            relation_desc = "普通的朋友"
+    elif intimacy < 80:
+        if familiarity > 80 and trust > 80:
+            relation_desc = "亲密的朋友"
+        elif interest_match > 80:
+            relation_desc = "志同道合的朋友"
+        else:
+            relation_desc = "值得信赖的朋友"
+    else:
+        if familiarity > 90 and trust > 90:
+            relation_desc = "最亲密的朋友"
+        else:
+            relation_desc = "非常要好的朋友"
+
+    # 计算次要心情显示内容
+    secondary_emotion_message = f" + 次要心情: {secondary_emotion}" if secondary_emotion else ""
+    
+    # 构造 Prompt
     final_system_prompt = AGENT_SYSTEM_PROMPT.format(
         core_persona=ALICE_CORE_PERSONA,
         time=now_str,
-        current_user=f"{user_display_name} (ID: {real_user_id})",
+        current_user=f"{user_display_name} ({real_user_id})",
         vision_summary=vision_summary_text,
-        mood_label=psych_ctx.get("primary_emotion", "平淡"),
+        primary_emotion=primary_emotion,
+        secondary_emotion_message=secondary_emotion_message,
+        valence=valence,
+        arousal=arousal,
+        stress=stress,
+        fatigue=fatigue,
         internal_thought=psych_ctx.get("internal_thought", "思考中..."),
         style_instruction=psych_ctx.get("style_instruction", "保持日常语气"),
-        intimacy=psych_ctx.get("current_intimacy", 30),
+        intimacy=intimacy,
+        familiarity=familiarity,
+        trust=trust,
+        interest_match=interest_match,
+        relation_desc=relation_desc,
         memories=memory_context
     ) + "\n\n" + format_instruction
 
@@ -176,7 +232,7 @@ async def agent_node(state: AgentState):
     # 🚀 [核心修复 2] Sticker 兜底指令
     # 即使短路逻辑被绕过（比如用户说了"哈哈" + 表情包），也要防止 LLM 幻视分析图片
     if visual_type == "sticker":
-        print(f"[{ts}] 🎭 [Alice Core] Injecting STICKER SAFEGUARD.")
+        logger.info(f"[{ts}] 🎭 [Alice Core] Injecting STICKER SAFEGUARD.")
         safeguard = (
             "【系统强制指令】\n"
             "用户最后发送的是一个【表情包/Sticker】（代码中可能显示为'[图片]'）。\n"
@@ -200,11 +256,11 @@ async def agent_node(state: AgentState):
         if parsed_result:
             parsed = parsed_result
         else:
-            print(f"[{ts}] ⚠️ [Agent JSON Fail] Raw: {content[:50]}...")
+            logger.warning(f"[{ts}] ⚠️ [Agent JSON Fail] Raw: {content[:50]}...")
             if "{" not in content:
                 parsed = {"monologue": "Raw Text", "action": "reply", "response": content}
     except Exception as e:
-        print(f"[{ts}]❌ [Agent LLM Error] {e}")
+        logger.error(f"[{ts}]❌ [Agent LLM Error] {e}")
 
     # 构造返回
     ai_msg = AIMessage(content=parsed.get("response", "..."))

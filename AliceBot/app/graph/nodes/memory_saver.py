@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -52,6 +53,9 @@ llm = ChatOpenAI(
     api_key=config.SMALL_MODEL_API_KEY,
     base_url=config.SMALL_MODEL_URL
 )
+
+# 配置日志
+logger = logging.getLogger("MemorySaver")
 
 
 async def memory_saver_node(state: AgentState):
@@ -144,19 +148,19 @@ async def memory_saver_node(state: AgentState):
                     "category": category
                 })
 
-                print(f"[{ts}] 🧠 [Memory] Saved ({mode}): {content} (ID: {real_user_id}, Importance: {importance})")
+                logger.info(f"[{ts}] 🧠 [Memory] Saved ({mode}): {content} (ID: {real_user_id}, Importance: {importance})")
 
         if facts_to_add:
-            vector_db.add_texts(facts_to_add, metadatas_to_add)
+            await vector_db.add_texts(facts_to_add, metadatas_to_add)
             
             # 同时更新组合内存管理器
             try:
-                combined_memory.update_memory(user_text, ai_output, real_user_id, user_nickname)
-                print(f"[{ts}] 🧠 [CombinedMemory] Updated memories for user {real_user_id}")
+                await combined_memory.update_memory(user_text, ai_output, real_user_id, user_nickname)
+                logger.info(f"[{ts}] 🧠 [CombinedMemory] Updated memories for user {real_user_id}")
             except Exception as e:
-                print(f"[{ts}] ❌ [CombinedMemory] Failed to update: {e}")
+                logger.error(f"[{ts}] ❌ [CombinedMemory] Failed to update: {e}")
 
     except Exception as e:
-        print(f"[{ts}] ❌ [Memory Error] {e}")
+        logger.error(f"[{ts}] ❌ [Memory Error] {e}")
 
     return {}

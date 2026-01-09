@@ -2,6 +2,10 @@ import threading
 import time
 import base64
 import asyncio
+import logging
+
+# 配置日志
+logger = logging.getLogger("ScreenMonitor")
 import mss
 import mss.tools
 import numpy as np
@@ -39,7 +43,7 @@ class ScreenMonitor:
 
             return base64.b64encode(buffered.getvalue()).decode('utf-8')
         except Exception as e:
-            print(f"[Monitor] Compression Error: {e}")
+            logger.error(f"[Monitor] Compression Error: {e}")
             return None
 
     def _safe_push(self, event_data):
@@ -68,11 +72,11 @@ class ScreenMonitor:
                 # 直接在当前线程压缩
                 return self._compress_image(img)
         except Exception as e:
-            print(f"[Monitor] Snapshot Error: {e}")
+            logger.error(f"[Monitor] Snapshot Error: {e}")
             return None
 
     def _monitor_loop(self):
-        print("[Monitor] Optical Nerve Connected (MSS High-Speed).")
+        logger.info("[Monitor] Optical Nerve Connected (MSS High-Speed).")
 
         with mss.mss() as sct:
             monitor = sct.monitors[1]
@@ -112,7 +116,7 @@ class ScreenMonitor:
                             self._safe_push(event_data)
 
                 except Exception as e:
-                    print(f"[Monitor Loop Error] {e}")
+                    logger.error(f"[Monitor Loop Error] {e}")
 
                 elapsed = time.time() - start_time
                 sleep_time = max(0.1, self.interval - elapsed)

@@ -1,4 +1,6 @@
 import chromadb
+import hashlib
+import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import math
@@ -7,6 +9,10 @@ from openai import OpenAI
 from langchain_core.vectorstores import VectorStore
 from langchain_core.documents import Document
 from app.core.config import config
+from app.utils.cache import cached_embedding_get, cached_embedding_set
+
+# 配置日志
+logger = logging.getLogger("VectorStore")
 
 
 class VectorMemory(VectorStore):
@@ -32,16 +38,41 @@ class VectorMemory(VectorStore):
             name=config.COLLECTION_NAME
         )
 
-    def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """手动生成嵌入向量"""
+    async def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """手动生成嵌入向量，带缓存"""
+        import asyncio
+        from app.utils.cache import cached_embedding_get, cached_embedding_set
+        
         texts = [t.replace("\n", " ") for t in texts]
-        response = self.openai_client.embeddings.create(
-            input=texts,
-            model=self.embedding_model
-        )
-        return [data.embedding for data in response.data]
+        embeddings = []
+        uncached_texts = []
+        uncached_indices = []
+        
+        # 先检查缓存
+        for i, text in enumerate(texts):
+            cached_emb = await cached_embedding_get(text, self.embedding_model)
+            if cached_emb:
+                embeddings.append(cached_emb)
+            else:
+                uncached_texts.append(text)
+                uncached_indices.append(i)
+        
+        # 如果有未缓存的文本，调用API获取嵌入向量
+        if uncached_texts:
+            response = self.openai_client.embeddings.create(
+                input=uncached_texts,
+                model=self.embedding_model
+            )
+            uncached_embeddings = [data.embedding for data in response.data]
+            
+            # 将新获取的嵌入向量加入结果并缓存
+            for idx, text, emb in zip(uncached_indices, uncached_texts, uncached_embeddings):
+                embeddings.insert(idx, emb)
+                await cached_embedding_set(text, self.embedding_model, emb)
+        
+        return embeddings
 
-    def add_texts(self, texts: List[str], metadatas: Optional[List[dict]] = None,
+    async def add_texts(self, texts: List[str], metadatas: Optional[List[dict]] = None,
                   ids: Optional[List[str]] = None, **kwargs) -> List[str]:
         """添加文本到向量存储"""
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -61,8 +92,8 @@ class VectorMemory(VectorStore):
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             final_metadatas = [{"source": "interaction", "importance": 1, "created_at": now_str}] * len(texts)
 
-        # 手动生成嵌入向量
-        embeddings = self._generate_embeddings(texts)
+        # 手动生成嵌入向量（异步）
+        embeddings = await self._generate_embeddings(texts)
 
         # 加锁写入
         with self._lock:
@@ -75,15 +106,15 @@ class VectorMemory(VectorStore):
                 )
                 return ids
             except Exception as e:
-                print(f"[{ts}] ❌ [VectorStore Write Error] {e}")
+                logger.error(f"[{ts}] ❌ [VectorStore Write Error] {e}")
                 return []
 
-    def similarity_search(self, query: str, k: int = 4, **kwargs) -> List[Document]:
+    async def similarity_search(self, query: str, k: int = 4, **kwargs) -> List[Document]:
         """相似性搜索"""
         with self._lock:
             try:
-                # 手动生成查询嵌入向量
-                query_embedding = self._generate_embeddings([query])[0]
+                # 手动生成查询嵌入向量（异步）
+                query_embedding = await self._generate_embeddings([query])[0]
                 
                 results = self.collection.query(
                     query_embeddings=[query_embedding],
@@ -91,7 +122,7 @@ class VectorMemory(VectorStore):
                     include=["documents", "metadatas", "distances"]
                 )
             except Exception as e:
-                print(f"[VectorStore Error] Search failed: {e}")
+                logger.error(f"[VectorStore Error] Search failed: {e}")
                 return []
 
         if not results["documents"]:
@@ -113,12 +144,12 @@ class VectorMemory(VectorStore):
         scored_candidates.sort(key=lambda x: x[1], reverse=True)
         return [doc_score[0] for doc_score in scored_candidates[:k]]
 
-    def similarity_search_with_score(self, query: str, k: int = 4, **kwargs) -> List[tuple[Document, float]]:
+    async def similarity_search_with_score(self, query: str, k: int = 4, **kwargs) -> List[tuple[Document, float]]:
         """带分数的相似性搜索"""
         with self._lock:
             try:
-                # 手动生成查询嵌入向量
-                query_embedding = self._generate_embeddings([query])[0]
+                # 手动生成查询嵌入向量（异步）
+                query_embedding = await self._generate_embeddings([query])[0]
                 
                 results = self.collection.query(
                     query_embeddings=[query_embedding],
@@ -126,7 +157,7 @@ class VectorMemory(VectorStore):
                     include=["documents", "metadatas", "distances"]
                 )
             except Exception as e:
-                print(f"[VectorStore Error] Search failed: {e}")
+                logger.error(f"[VectorStore Error] Search failed: {e}")
                 return []
 
         if not results["documents"]:
@@ -158,12 +189,22 @@ class VectorMemory(VectorStore):
         except:
             return 1.0
 
-    def search(self, query: str, k: int = 3) -> List[str]:
-        """自定义搜索，考虑时间衰减和重要性"""
+    async def search(self, query: str, k: int = 3) -> List[str]:
+        """自定义搜索，考虑时间衰减和重要性，带缓存"""
+        import asyncio
+        from app.utils.cache import cached_context_get, cached_context_set
+        
+        # 先检查上下文缓存
+        cache_key = f"vector_search:{hash(query)}:{k}"
+        cached_results = await cached_context_get(cache_key)
+        if cached_results:
+            return cached_results
+        
         with self._lock:
             try:
-                # 手动生成查询嵌入向量
-                query_embedding = self._generate_embeddings([query])[0]
+                # 手动生成查询嵌入向量（使用异步方法）
+                query_embedding = await self._generate_embeddings([query])
+                query_embedding = query_embedding[0] if query_embedding else []
                 
                 results = self.collection.query(
                     query_embeddings=[query_embedding],
@@ -171,7 +212,7 @@ class VectorMemory(VectorStore):
                     include=["documents", "metadatas", "distances"]
                 )
             except Exception as e:
-                print(f"[VectorStore Error] Search failed: {e}")
+                logger.error(f"[VectorStore Error] Search failed: {e}")
                 return []
 
         if not results["documents"]:
@@ -195,16 +236,19 @@ class VectorMemory(VectorStore):
 
         scored_candidates.sort(key=lambda x: x[0], reverse=True)
         top_docs = [item[1] for item in scored_candidates[:k]]
+        
+        # 将结果存入上下文缓存
+        await cached_context_set(cache_key, top_docs, ttl=1800)  # 缓存30分钟
 
         return top_docs
 
-    def delete_by_semantic(self, query: str, threshold: float = 0.3):
+    async def delete_by_semantic(self, query: str, threshold: float = 0.3):
         """通过语义删除相似项"""
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._lock:
             try:
-                # 手动生成查询嵌入向量
-                query_embedding = self._generate_embeddings([query])[0]
+                # 手动生成查询嵌入向量（异步）
+                query_embedding = await self._generate_embeddings([query])[0]
                 
                 # 使用查询获取相似的文档
                 results = self.collection.query(
@@ -236,25 +280,25 @@ class VectorMemory(VectorStore):
                     # 计算余弦相似度
                     similarity = np.dot(query_emb, doc_emb) / (np.linalg.norm(query_emb) * np.linalg.norm(doc_emb))
                     
-                    print(f"DEBUG: Doc {i}: {doc[:50]}..., Similarity: {similarity:.4f}, Distance: {distance:.4f}")
+                    logger.debug(f"Doc {i}: {doc[:50]}..., Similarity: {similarity:.4f}, Distance: {distance:.4f}")
                     
                     # 余弦相似度大于阈值时删除
                     if similarity > threshold:
                         # 使用文档内容查找对应的ID
                         if doc in doc_id_map:
                             ids_to_delete.append(doc_id_map[doc])
-                            print(f"DEBUG: Found ID {doc_id_map[doc]} for document")
+                            logger.debug(f"Found ID {doc_id_map[doc]} for document")
                 
-                print(f"DEBUG: Total ids to delete: {len(ids_to_delete)}")
-                print(f"DEBUG: Ids to delete: {ids_to_delete}")
+                logger.debug(f"Total ids to delete: {len(ids_to_delete)}")
+                logger.debug(f"Ids to delete: {ids_to_delete}")
                 
                 if ids_to_delete:
                     self.collection.delete(ids=ids_to_delete)
-                    print(f"[{ts}] 🧹 [Memory] Deleted {len(ids_to_delete)} items.")
+                    logger.info(f"[{ts}] 🧹 [Memory] Deleted {len(ids_to_delete)} items.")
                     return len(ids_to_delete)
                 return 0
             except Exception as e:
-                print(f"[{ts}] [VectorStore] Delete error: {e}")
+                logger.error(f"[{ts}] [VectorStore] Delete error: {e}")
                 return 0
 
     # 实现LangChain VectorStore接口的其他必要方法
@@ -264,25 +308,25 @@ class VectorMemory(VectorStore):
         return VectorStoreRetriever(vectorstore=self, **kwargs)
 
     @classmethod
-    def from_documents(cls, documents: List[Document], embedding, **kwargs):
+    async def from_documents(cls, documents: List[Document], embedding, **kwargs):
         """从文档创建"""
         instance = cls()
         texts = [doc.page_content for doc in documents]
         metas = [doc.metadata for doc in documents]
-        instance.add_texts(texts, metas)
+        await instance.add_texts(texts, metas)
         return instance
 
-    def delete(self, ids: List[str], **kwargs):
+    async def delete(self, ids: List[str], **kwargs):
         """删除指定ID的文档"""
         with self._lock:
             try:
                 self.collection.delete(ids=ids)
                 return True
             except Exception as e:
-                print(f"❌ [VectorStore] Delete error: {e}")
+                logger.error(f"❌ [VectorStore] Delete error: {e}")
                 return False
                 
-    def search_by_keyword(self, keyword: str, k: int = 10) -> List[Dict[str, Any]]:
+    async def search_by_keyword(self, keyword: str, k: int = 10) -> List[Dict[str, Any]]:
         """
         通过关键词搜索记忆
         
@@ -302,7 +346,7 @@ class VectorMemory(VectorStore):
                     return []
                 
                 # 手动生成关键词嵌入向量（用于计算相似度）
-                keyword_embedding = self._generate_embeddings([keyword])[0]
+                keyword_embedding = await self._generate_embeddings([keyword])[0]
                 
                 # 过滤包含关键词的文档
                 import numpy as np
@@ -339,10 +383,10 @@ class VectorMemory(VectorStore):
                 return matching_docs[:k]
                 
             except Exception as e:
-                print(f"❌ [VectorStore] Keyword search error: {e}")
+                logger.error(f"❌ [VectorStore] Keyword search error: {e}")
                 return []
                 
-    def clear_all(self) -> bool:
+    async def clear_all(self) -> bool:
         """
         清除向量存储中的所有记忆
         
@@ -356,14 +400,14 @@ class VectorMemory(VectorStore):
                 self.collection = self.client.get_or_create_collection(name=config.COLLECTION_NAME)
                 return True
             except Exception as e:
-                print(f"❌ [VectorStore] Clear all error: {e}")
+                logger.error(f"❌ [VectorStore] Clear all error: {e}")
                 return False
 
     @classmethod
-    def from_texts(cls, texts: List[str], embedding, metadatas: Optional[List[dict]] = None, **kwargs):
+    async def from_texts(cls, texts: List[str], embedding, metadatas: Optional[List[dict]] = None, **kwargs):
         """从文本创建向量存储"""
         instance = cls()
-        instance.add_texts(texts, metadatas)
+        await instance.add_texts(texts, metadatas)
         return instance
 
 

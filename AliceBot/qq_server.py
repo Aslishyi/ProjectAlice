@@ -1,9 +1,34 @@
 # === Python代码文件: qq_server.py ===
 
+# 首先配置日志和警告过滤
+import logging
+import warnings
+import builtins
+from langchain_core._api.deprecation import LangChainDeprecationWarning
+
+# 添加调试日志
+import os
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 先创建一个临时日志器来记录启动时的调试信息
+import logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+temp_logger = logging.getLogger("DebugLogger")
+temp_logger.debug(f"Current working directory: {os.getcwd()}")
+temp_logger.debug(f"BASE_DIR in qq_server.py: {BASE_DIR}")
+
+# 导入配置以查看实际路径
+from app.core.config import config
+temp_logger.debug(f"VECTOR_DB_PATH: {config.VECTOR_DB_PATH}")
+temp_logger.debug(f"LOG_DIR: {config.LOG_DIR}")
+
+# 过滤第三方库警告
+warnings.filterwarnings("ignore", category=builtins.UserWarning, module="langchain_tavily")
+warnings.filterwarnings("ignore", category=LangChainDeprecationWarning)
+
 import uvicorn
 import asyncio
 import uuid
-import logging
 import re
 import time
 import os
@@ -18,13 +43,36 @@ from app.memory.local_history import LocalHistoryManager
 from app.background.dream import dream_machine
 from app.utils.qq_utils import parse_onebot_array_msg
 
+# 配置根日志记录器
+log_directory = os.path.join(os.path.dirname(__file__), "log")
+log_file = os.path.join(log_directory, "logfile.log")
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(name)s: %(message)s",
+# 创建日志格式
+log_format = logging.Formatter(
+    "[%(asctime)s] %(levelname)s - %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
+
+# 配置根日志记录器
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# 清除现有处理器
+root_logger.handlers.clear()
+
+# 添加控制台处理器
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_format)
+root_logger.addHandler(console_handler)
+
+# 添加文件处理器
+file_handler = logging.FileHandler(log_file, encoding="utf-8")
+file_handler.setFormatter(log_format)
+root_logger.addHandler(file_handler)
+
+# 禁用Chromadb遥测日志
+logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.WARNING)
+
 logger = logging.getLogger("QQServer")
 
 
@@ -294,7 +342,7 @@ class QQBotManager:
     async def _build_reactive_inputs(self, session_id: str, full_text: str, image_urls: list,
                                     user_qq: str, user_nickname: str, msg_type: str, is_mentioned: bool):
         """构建响应式模式的输入参数"""
-        profile = relation_db.get_user_profile(user_qq=user_qq, current_name=user_nickname)
+        profile = await relation_db.get_user_profile(user_qq=user_qq, current_name=user_nickname)
         history_msgs, history_summary = await LocalHistoryManager.load_state(session_id)
 
         human_msg = HumanMessage(
@@ -369,7 +417,7 @@ class QQBotManager:
                         # 高亲密度（>70）：5-120分钟
                         # 中亲密度（30-70）：15-360分钟
                         # 低亲密度（<30）：30-720分钟
-                        profile = relation_db.get_user_profile(user_qq=data["target_id"])
+                        profile = await relation_db.get_user_profile(user_qq=data["target_id"])
                         intimacy = profile.relationship.intimacy if profile else 50
                         
                         if intimacy > 70:
@@ -422,7 +470,7 @@ class QQBotManager:
                             # 这里简化，直接使用 target_id
                             pass
 
-                        profile = relation_db.get_user_profile(user_qq=last_sender_id)
+                        profile = await relation_db.get_user_profile(user_qq=last_sender_id)
 
                         inputs = {
                             "messages": history_msgs,  # 不加新消息
@@ -458,9 +506,20 @@ class QQBotManager:
 bot_manager = QQBotManager()
 
 
+# 定义主进程标识
+import uvicorn.config
+import os
+
+# 在Uvicorn多进程模式下，只有主进程会有这个环境变量
+is_main_process = os.environ.get('UVICORN_WORKER_ID') is None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动后台服务
+    import os
+    
+    # 启动DreamCycle
+    # DreamCycle内部有文件锁机制，确保只有一个进程能成功启动
     await dream_machine.start()
 
     # 🚀 启动主动任务循环
@@ -471,9 +530,11 @@ async def lifespan(app: FastAPI):
 
     # 停止
     proactive_task.cancel()
-    await dream_machine.stop()
+    
+    if is_main_process:
+        await dream_machine.stop()
+    
     logger.info("🛑 System Shutdown.")
-
 
 app = FastAPI(lifespan=lifespan)
 
@@ -552,22 +613,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ProjectAlice QQ Server")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="服务器主机地址")
     parser.add_argument("--port", type=int, default=6199, help="服务器端口")
-    parser.add_argument("--workers", type=int, default=None, help="工作进程数，默认根据CPU核心数自动调整")
+    parser.add_argument("--workers", type=int, default=4, help="工作进程数，默认根据CPU核心数自动调整")
     args = parser.parse_args()
     
-    # 如果未指定工作进程数，根据CPU核心数自动调整
+    # 启用多进程模式，利用多核CPU提高性能
     if args.workers is None:
-        # 获取CPU核心数
-        import multiprocessing
-        cpu_count = multiprocessing.cpu_count()
-        # 根据CPU核心数设置合适的工作进程数
-        args.workers = min(cpu_count * 2, 8)  # 最多8个进程
+        import os
+        args.workers = os.cpu_count()  # 默认使用所有CPU核心
     
-    print(f"🚀 启动ProjectAlice服务器 [多进程模式: {args.workers}个进程]")
-    print(f"📡 监听地址: http://{args.host}:{args.port}")
+    logger.info(f"🚀 启动ProjectAlice服务器 [多进程模式，工作进程数: {args.workers}]")
+    logger.info(f"📡 监听地址: http://{args.host}:{args.port}")
     
-    # 启动Uvicorn服务器，使用多进程模式
-    # 需要将应用程序作为导入字符串传递才能启用多进程
+    # 启动Uvicorn服务器
     uvicorn.run(
         "qq_server:app",
         host=args.host,

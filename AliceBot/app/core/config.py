@@ -4,6 +4,9 @@ from dotenv import load_dotenv
 # 加载 .env 文件
 load_dotenv()
 
+# 获取AliceBot根目录
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 class Config:
     # --- LLM Settings ---
@@ -58,7 +61,7 @@ class Config:
         MODEL_NAME = MIMO_MODEL
 
     # --- Vector DB Settings ---
-    VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH", "./chroma_db")
+    VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH", os.path.join(BASE_DIR, "data", "chroma_db"))
     COLLECTION_NAME = "anima_memories"
 
     # --- Tool Settings ---
@@ -70,7 +73,7 @@ class Config:
     DEFAULT_AROUSAL = 0.5  # 平静且专注
 
     # --- System Paths ---
-    LOG_DIR = "./logs"
+    LOG_DIR = os.getenv("LOG_DIR", os.path.join(BASE_DIR, "log"))
 
 
 

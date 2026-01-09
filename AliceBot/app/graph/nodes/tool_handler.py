@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 
 from langchain_core.messages import ToolMessage  # 引入 ToolMessage
@@ -5,7 +6,11 @@ from app.core.state import AgentState
 from app.tools.web_search import perform_web_search
 from app.tools.image_gen import generate_image
 from app.tools.data_analysis import run_python_analysis
+from app.utils.cache import cached_tool_result_get, cached_tool_result_set
 import uuid
+
+# 配置日志
+logger = logging.getLogger("ToolHandler")
 
 
 async def tool_node(state: AgentState):
@@ -22,7 +27,7 @@ async def tool_node(state: AgentState):
     # 虽然这里我们是通过 prompt 模拟的调用，但保持结构一致性有好处
     tool_call_id = str(uuid.uuid4())
 
-    print(f"[{ts}] --- [Tools] Executing: {tool_name} with {tool_args} ---")
+    logger.info(f"[{ts}] --- [Tools] Executing: {tool_name} with {tool_args} --- ")
 
     result = "Tool execution failed."
 
@@ -42,18 +47,36 @@ async def tool_node(state: AgentState):
 
         final_arg = str(final_arg)
 
-        if tool_name == "web_search":
-            result = perform_web_search.invoke(final_arg)
-        elif tool_name == "generate_image":
-            url = generate_image.invoke(final_arg)
-            result = f"IMAGE_GENERATED: {url}"
-        elif tool_name == "run_python_analysis":
-            result = run_python_analysis.invoke(final_arg)
+        # 检查工具调用结果缓存
+        cache_key_args = {"arg": final_arg}
+        cached_result = await cached_tool_result_get(tool_name, cache_key_args)
+        
+        if cached_result:
+            logger.info(f"[{ts}] [Tools Cache Hit] {tool_name}: {final_arg[:30]}... ")
+            result = cached_result
         else:
-            result = f"Unknown tool: {tool_name}"
+            # 缓存未命中，执行工具调用
+            if tool_name == "web_search":
+                # 直接调用异步函数，不通过ainvoke方法
+                result = await perform_web_search(final_arg)
+            elif tool_name == "generate_image":
+                # 直接调用异步函数，不通过ainvoke方法
+                url = await generate_image(final_arg)
+                result = f"IMAGE_GENERATED: {url}"
+            elif tool_name == "run_python_analysis":
+                # 对于不支持异步的工具，使用asyncio的run_in_executor避免阻塞
+                import asyncio
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, run_python_analysis, final_arg)
+            else:
+                result = f"Unknown tool: {tool_name}"
+            
+            # 将结果存入缓存
+            await cached_tool_result_set(tool_name, cache_key_args, result)
+            logger.info(f"[{ts}] [Tools Cache Set] {tool_name}: {final_arg[:30]}... ")
 
     except Exception as e:
-        print(f"[{ts}] [Tool Error] {e}")
+        logger.error(f"[{ts}] [Tool Error] {e}")
         result = f"Tool Error: {str(e)}"
 
     # --- 改进点：使用 ToolMessage ---

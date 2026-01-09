@@ -1,13 +1,20 @@
 import os
 import json
 import aiofiles
+import logging
 from datetime import datetime
 from typing import List, Tuple, Dict, Any
 from langchain_core.messages import BaseMessage, messages_to_dict, messages_from_dict, HumanMessage, AIMessage
 from pathlib import Path
 
+# 配置日志
+logger = logging.getLogger("LocalHistory")
+
 # 定义存储路径（用于JSON文件存储）
-HISTORY_DIR = "./data/history"
+import os
+# 获取当前文件所在目录的父目录
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HISTORY_DIR = os.path.join(BASE_DIR, "data", "history")
 
 
 class LocalHistoryManager:
@@ -27,7 +34,7 @@ class LocalHistoryManager:
         :param session_id: 会话唯一标识 (private_xxx 或 group_xxx)
         """
         if not session_id:
-            print("⚠️ [History] Cannot save: session_id is missing.")
+            logger.warning("⚠️ [History] Cannot save: session_id is missing.")
             return
 
         # 确保存储目录存在
@@ -50,7 +57,7 @@ class LocalHistoryManager:
                 await f.write(json.dumps(data, ensure_ascii=False, indent=2))
             # print(f"✅ [History] Saved to {file_path}")
         except Exception as e:
-            print(f"❌ [History] Save failed for {session_id}: {e}")
+            logger.error(f"❌ [History] Save failed for {session_id}: {e}")
 
     @classmethod
     async def load_state(cls, session_id: str) -> Tuple[List[BaseMessage], str]:
@@ -84,7 +91,7 @@ class LocalHistoryManager:
                 return messages, summary
 
         except Exception as e:
-            print(f"❌ [History] Load failed for {session_id}: {e}")
+            logger.error(f"❌ [History] Load failed for {session_id}: {e}")
             return [], ""
 
     @classmethod
@@ -110,7 +117,7 @@ class LocalHistoryManager:
                 data = json.loads(content)
                 return data.get("summary", "")
         except Exception as e:
-            print(f"❌ [History] Get summary failed for {session_id}: {e}")
+            logger.error(f"❌ [History] Get summary failed for {session_id}: {e}")
             return ""
     
     @classmethod
@@ -128,5 +135,5 @@ class LocalHistoryManager:
         if not os.path.exists(file_path):
             return
         
-        print(f"✅ [History] JSON file found for {session_id}")
+        logger.info(f"✅ [History] JSON file found for {session_id}")
 

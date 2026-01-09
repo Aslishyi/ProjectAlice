@@ -1,6 +1,10 @@
+import logging
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage
+
+# 配置日志
+logger = logging.getLogger("Summarizer")
 from app.core.state import AgentState
 from app.core.config import config
 from app.memory.local_history import LocalHistoryManager
@@ -62,7 +66,7 @@ async def summarizer_node(state: AgentState):
             messages = remaining
 
         except Exception as e:
-            print(f"❌ [Summarizer Error] {e}")
+            logger.error(f"❌ [Summarizer Error] {e}")
 
     # 2. 核心修复：调用异步保存方法，传入 session_key
     # 假设 LocalHistoryManager.save_state 签名支持 session_id 参数
@@ -70,7 +74,7 @@ async def summarizer_node(state: AgentState):
     if session_key:
         await LocalHistoryManager.save_state(messages, current_summary, session_id=session_key)
     else:
-        print("⚠️ [Summarizer] No session_id found, history might not persist correctly.")
+        logger.warning("⚠️ [Summarizer] No session_id found, history might not persist correctly.")
 
     return {
         "messages": messages,

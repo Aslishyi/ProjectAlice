@@ -3,7 +3,11 @@
 import json
 import re
 import time
+import logging
 from datetime import datetime
+
+# 配置日志
+logger = logging.getLogger("ContextFilter")
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage
@@ -235,7 +239,7 @@ async def context_filter_node(state: AgentState):
 
             log_icon = "✅" if should else "🛑"
             mode_icon = "👥" if is_group else "👤"
-            print(f"[{ts}]{log_icon} [Filter] [{mode_icon}] Reply? {should} | Reason: {reason[:100]}")
+            logger.info(f"[{ts}]{log_icon} [Filter] [{mode_icon}] Reply? {should} | Reason: {reason[:100]}")
 
             return {
                 "should_reply": should,
@@ -243,7 +247,7 @@ async def context_filter_node(state: AgentState):
                 "last_interaction_ts": current_ts
             }
         else:
-            print(f"[{ts}]⚠️ [Filter Warning] JSON Parse Failed. Raw: {raw_content[:50]}...")
+            logger.warning(f"[{ts}]⚠️ [Filter Warning] JSON Parse Failed. Raw: {raw_content[:50]}...")
             # 兜底：私聊回，群聊不回
             return {
                 "should_reply": not is_group,
@@ -252,7 +256,7 @@ async def context_filter_node(state: AgentState):
             }
 
     except Exception as e:
-        print(f"[{ts}]❌ [Filter Error] {e}. Fallback used.")
+        logger.error(f"[{ts}]❌ [Filter Error] {e}. Fallback used.")
         return {
             "should_reply": not is_group,
             "filter_reason": f"Error fallback: {str(e)}",

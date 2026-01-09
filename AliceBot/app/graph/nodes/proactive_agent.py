@@ -1,5 +1,6 @@
 import json
 import time
+import logging
 from datetime import datetime
 from typing import List, Any
 from langchain_openai import ChatOpenAI
@@ -10,6 +11,9 @@ from app.core.global_store import global_store
 from app.memory.relation_db import relation_db
 from app.core.prompts import SOCIAL_VOLITION_PROMPT
 from app.utils.cache import cached_llm_invoke
+
+# 配置日志
+logger = logging.getLogger("ProactiveAgent")
 
 # 建议使用逻辑能力较强的模型 (如 GPT-4o, Qwen-72B)
 llm = ChatOpenAI(
@@ -37,7 +41,7 @@ async def proactive_node(state: AgentState):
     综合判断图片性质(实图/表情包)、最近文本消息、沉默时长和好感度。
     """
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] --- [Proactive] Analyzing Social Context... ---")
+    logger.info(f"[{ts}] --- [Proactive] Analyzing Social Context... ---")
 
     # 获取基础上下文
     context = _get_basic_context(state, ts)
@@ -58,7 +62,7 @@ async def proactive_node(state: AgentState):
     image_data, visual_type, vision_desc = visual_info
     
     # 获取用户关系数据
-    user_relation = _get_user_relation_data(user_id)
+    user_relation = await _get_user_relation_data(user_id)
     profile, rel, user_tags, user_birthday, user_hobbies = user_relation
     
     # 获取环境和情绪信息
@@ -120,7 +124,7 @@ def _get_basic_context(state: AgentState, ts: str):
         msgs = state.get("messages", [])
         return user_id, user_display_name, is_group, session_id, msgs, ts
     except Exception as e:
-        print(f"[{ts}] ❌ [Proactive] Failed to get basic context: {e}")
+        logger.error(f"[{ts}] ❌ [Proactive] Failed to get basic context: {e}")
         return None
 
 
@@ -182,11 +186,11 @@ def _process_visual_information(state: AgentState):
     return image_data, visual_type, vision_desc
 
 
-def _get_user_relation_data(user_id: str):
+async def _get_user_relation_data(user_id: str):
     """
     获取用户关系数据
     """
-    profile = relation_db.get_user_profile(user_id)
+    profile = await relation_db.get_user_profile(user_id)
     rel = profile.relationship
     # 获取用户的个性化信息
     user_tags = rel.tags if rel.tags else []
@@ -248,6 +252,9 @@ def _build_system_prompt(now_dt: datetime, silence_str: str, emotion: Any,
         stamina=emotion.stamina,
         user_name=user_display_name,
         intimacy=rel.intimacy,
+        familiarity=rel.familiarity,
+        trust=rel.trust,
+        interest_match=rel.interest_match,
         relation_tags=", ".join(rel.tags) if rel.tags else "无",
         relation_notes=rel.notes or "无",
         vision_desc=vision_desc,
@@ -267,7 +274,7 @@ async def _build_input_messages(prompt: str, visual_type: str, image_data: str,
 
     # 场景 A: 有意义的图片 (Photo) -> 发送 Base64 给 LLM
     if visual_type == "photo" and image_data:
-        print("[{ts}] 🔍 [Proactive] Injecting IMAGE payload for analysis.")
+        logger.info(f"[{ts}] 🔍 [Proactive] Injecting IMAGE payload for analysis.")
         input_msgs.append(HumanMessage(content=[
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}},
             {"type": "text",
@@ -276,7 +283,7 @@ async def _build_input_messages(prompt: str, visual_type: str, image_data: str,
 
     # 场景 B: 表情包 (Sticker) -> 拦截 Base64，仅发送文本提示
     elif visual_type == "sticker":
-        print("[{ts}] 🎭 [Proactive] Handling STICKER (Skipping visual payload).")
+        logger.info(f"[{ts}] 🎭 [Proactive] Handling STICKER (Skipping visual payload).")
         # 告诉 LLM 这是个表情包，不需要深度分析，只需要社交回应
         sticker_prompt = (
             f"[系统通知] 用户发送了一个表情包 (Sticker)。\n"
@@ -358,7 +365,7 @@ async def _process_llm_response(input_msgs: List[Any], ts: str):
         try:
             decision = json.loads(content)
         except:
-            print(f"[{ts}] ⚠️ [Proactive] JSON Parse fail: {content[:30]}...")
+            logger.warning(f"[{ts}] ⚠️ [Proactive] JSON Parse fail: {content[:30]}...")
             # 这里的 fallback 策略可以根据需求调整，默认保持沉默比较安全
             return None
 
@@ -366,11 +373,11 @@ async def _process_llm_response(input_msgs: List[Any], ts: str):
         reply_content = decision.get("content", "")
         reason = decision.get("reason", "")
 
-        print(f"[{ts}] 🤖 [Proactive Decision] {intent.upper()} | Reason: {reason}")
+        logger.info(f"[{ts}] 🤖 [Proactive Decision] {intent.upper()} | Reason: {reason}")
         return intent, reply_content, reason
         
     except Exception as e:
-        print(f"[{ts}] ❌ [Proactive Error] {e}")
+        logger.error(f"[{ts}] ❌ [Proactive Error] {e}")
         return None
 
 
@@ -383,12 +390,12 @@ def _filter_group_reply(reply_content: str, ts: str):
     # 避免在群聊中询问过于私人的问题
     private_questions = ["你最近怎么样", "你在干什么", "你的隐私", "你家里", "你的感情", "你工资", "你年龄", "你对象"]
     if any(q in lower_content for q in private_questions):
-        print(f"[{ts}] ⚠️ [Proactive] Filtered private content in group chat: {reply_content[:30]}...")
+        logger.warning(f"[{ts}] ⚠️ [Proactive] Filtered private content in group chat: {reply_content[:30]}...")
         return False
     # 避免在群聊中使用过于亲密的称呼
     intimate_terms = ["亲爱的", "宝贝", "老公", "老婆", "哥哥", "姐姐", "弟弟", "妹妹"]
     if any(term in reply_content for term in intimate_terms):
-        print(f"[{ts}] ⚠️ [Proactive] Filtered intimate term in group chat: {reply_content[:30]}...")
+        logger.warning(f"[{ts}] ⚠️ [Proactive] Filtered intimate term in group chat: {reply_content[:30]}...")
         return False
     # 群聊回复保持简洁
     if len(reply_content) > 100:

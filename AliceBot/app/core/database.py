@@ -7,10 +7,13 @@ import os
 from typing import Generator
 
 # 数据库路径
-DB_PATH = "data/project_alice.db"
+# 获取当前文件所在目录的父目录
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DB_PATH = os.path.join(BASE_DIR, "data", "project_alice.db")
 
 # 确保数据目录存在
-os.makedirs("data", exist_ok=True)
+data_dir = os.path.join(BASE_DIR, "data")
+os.makedirs(data_dir, exist_ok=True)
 
 # 创建数据库引擎
 engine = create_engine(

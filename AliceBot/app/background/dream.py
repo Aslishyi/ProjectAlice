@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import List, Dict
 
@@ -53,9 +54,51 @@ class DreamCycle:
         )
 
     async def start(self):
-        self.running = True
-        self._task = asyncio.create_task(self._dream_loop())
-        logger.info("💤 [Dream] Background memory consolidation module started.")
+        # 在Windows上使用文件锁确保只有一个进程能启动DreamCycle
+        lock_file_path = os.path.join(os.path.dirname(__file__), "dream_lock.lock")
+        lock_file = None
+        
+        try:
+            # 尝试打开锁文件
+            lock_file = open(lock_file_path, 'w')
+            
+            # 检查操作系统类型
+            if os.name == 'nt':  # Windows
+                # 在Windows上使用msvcrt.lock来获取文件锁
+                import msvcrt
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    # 如果成功获取锁，保存文件对象并启动DreamCycle
+                    self._lock_file = lock_file
+                    self.running = True
+                    self._task = asyncio.create_task(self._dream_loop())
+                    logger.info("💤 [Dream] Background memory consolidation module started.")
+                except IOError:
+                    # 无法获取锁，说明已经有其他进程在运行DreamCycle
+                    logger.info("💤 [DreamCycle] Already running in another process. Skipping startup.")
+                    lock_file.close()
+                    return
+            else:  # 非Windows
+                # 如果是在非Windows平台，使用fcntl
+                try:
+                    import fcntl
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    # 如果成功获取锁，保存文件对象并启动DreamCycle
+                    self._lock_file = lock_file
+                    self.running = True
+                    self._task = asyncio.create_task(self._dream_loop())
+                    logger.info("💤 [Dream] Background memory consolidation module started.")
+                except (BlockingIOError, IOError):
+                    # 无法获取锁，说明已经有其他进程在运行DreamCycle
+                    logger.info("💤 [DreamCycle] Already running in another process. Skipping startup.")
+                    lock_file.close()
+                    return
+        except Exception as e:
+            # 处理其他可能的异常
+            logger.error(f"💤 [DreamCycle] Error during startup: {e}")
+            if lock_file:
+                lock_file.close()
+            return
 
     async def stop(self):
         self.running = False
@@ -65,6 +108,21 @@ class DreamCycle:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        
+        # 释放文件锁
+        if hasattr(self, '_lock_file') and self._lock_file:
+            try:
+                import msvcrt
+                msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            except ImportError:
+                try:
+                    import fcntl
+                    fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+                except:
+                    pass
+            finally:
+                self._lock_file.close()
+                logger.info("💤 [Dream] Background memory consolidation module stopped.")
 
     async def _dream_loop(self):
         while self.running:
@@ -212,7 +270,7 @@ class DreamCycle:
                 "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
                 "consolidated_from_count": len(batch)
             }
-            vector_db.add_texts([result_text], [new_metadata])
+            await vector_db.add_texts([result_text], [new_metadata])
 
             # B. 删除旧碎片 (物理删除，释放空间)
             # vector_db.collection.delete(ids=batch_ids) # 暂时注释掉，为了调试安全。确认稳定后取消注释。

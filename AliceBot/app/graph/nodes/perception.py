@@ -2,9 +2,13 @@ import base64
 import httpx
 import io
 import re  # <--- 新增
+import logging
 from PIL import Image
 from langchain_core.messages import HumanMessage
 from app.core.state import AgentState
+
+# 配置日志
+logger = logging.getLogger("Perception")
 
 # 用于在内存中临时缓存已处理的图片尺寸信息，避免重复下载
 _IMG_CACHE = {}
@@ -54,10 +58,10 @@ def _classify_image(image: Image.Image, file_size_kb: float) -> str:
     if width < 50 or height < 50:
         return "icon"
     elif is_square_ish and (width <= 1024 or height <= 1024 or file_size_kb < 1024):
-        print(f"👁️ -> Classified as STICKER ({width}x{height})")
+        logger.info(f"👁️ -> Classified as STICKER ({width}x{height})")
         return "sticker"
     else:
-        print(f"👁️ -> Classified as PHOTO. Compressing...")
+        logger.info(f"👁️ -> Classified as PHOTO. Compressing...")
         return "photo"
 
 
@@ -65,7 +69,7 @@ async def _download_and_process_image(target_url: str) -> tuple:
     """
     下载并处理图片
     """
-    print(f"👁️ [Perception] Downloading: {target_url[:50]}...")
+    logger.info(f"👁️ [Perception] Downloading: {target_url[:50]}...")
     
     try:
         async with httpx.AsyncClient() as client:
@@ -89,20 +93,20 @@ async def _download_and_process_image(target_url: str) -> tuple:
                     return visual_type, final_image_data
                     
                 except Exception as img_err:
-                    print(f"⚠️ [Perception] Image processing error: {img_err}")
+                    logger.warning(f"⚠️ [Perception] Image processing error: {img_err}")
                     _IMG_CACHE[target_url] = ("failed", 0, 0, 0)
                     return "error", None
             else:
-                print(f"⚠️ [Perception] Download Failed: HTTP {resp.status_code}.")
+                logger.warning(f"⚠️ [Perception] Download Failed: HTTP {resp.status_code}.")
                 _IMG_CACHE[target_url] = ("failed", 0, 0, 0)
                 return "failed", None
                 
     except httpx.TimeoutException:
-        print("⚠️ [Perception] Download TIMEOUT. Skipping.")
+        logger.warning("⚠️ [Perception] Download TIMEOUT. Skipping.")
         _IMG_CACHE[target_url] = ("failed", 0, 0, 0)
         return "timeout", None
     except Exception as e:
-        print(f"⚠️ [Perception] Network error: {e}")
+        logger.warning(f"⚠️ [Perception] Network error: {e}")
         return "error", None
 
 
@@ -124,7 +128,7 @@ async def perception_node(state: AgentState) -> dict:
     # 缓存检查
     if target_url in _IMG_CACHE:
         cached_type, w, h, size = _IMG_CACHE[target_url]
-        print(f"⚡ [Perception] Cache Hit: {cached_type} ({w}x{h})")
+        logger.info(f"⚡ [Perception] Cache Hit: {cached_type} ({w}x{h})")
         if cached_type in ["sticker", "icon", "failed"]:
             return {"visual_type": cached_type, "current_image_artifact": None}
     

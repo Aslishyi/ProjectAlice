@@ -1,6 +1,10 @@
 import json
+import logging
 from datetime import datetime
 from typing import List, Union
+
+# 配置日志
+logger = logging.getLogger("VisionRouter")
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, BaseMessage, AIMessage
 from app.core.config import config
@@ -72,12 +76,12 @@ class VisionRouter:
             if len(str(last_query)) > 20: last_query = str(last_query)[:20] + "..."
 
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[{ts}] --- [Router] Needs Vision? {result} (Context: {last_query}) ---")
+            logger.info(f"[{ts}] --- [Router] Needs Vision? {result} (Context: {last_query}) ---")
             return result
 
         except Exception as e:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[{ts}] [Router Error] {e} -> Defaulting to TRUE (Safety Fallback)")
+            logger.error(f"[{ts}] [Router Error] {e} -> Defaulting to TRUE (Safety Fallback)")
             return True
 
 

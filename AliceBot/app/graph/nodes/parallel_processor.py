@@ -1,6 +1,10 @@
 # app/graph/nodes/parallel_processor.py
 
 import asyncio
+import logging
+
+# 配置日志
+logger = logging.getLogger("ParallelProcessor")
 from app.core.state import AgentState
 from app.graph.nodes.perception import perception_node
 from app.graph.nodes.psychology import psychology_node
@@ -20,13 +24,13 @@ async def parallel_processing_node(state: AgentState) -> dict:
     if image_urls:
         # A. 如果当前消息直接包含图片，必须看
         should_see = True
-        print("⚡ [Parallel] New image detected. Vision activated.")
+        logger.info("⚡ [Parallel] New image detected. Vision activated.")
     else:
         # B. 如果是纯文本，询问 Router 是否需要回溯看图
         # 注意：这里传入 messages 历史，Router 会判断是否有 "看看这个" 之类的指代词
         should_see = await vision_router.should_see(state.get("messages", []))
         if should_see:
-            print("⚡ [Parallel] Vision Router decided to look at context.")
+            logger.info("⚡ [Parallel] Vision Router decided to look at context.")
 
     # 2. 构造任务列表
     tasks = []
@@ -36,10 +40,10 @@ async def parallel_processing_node(state: AgentState) -> dict:
 
     # 任务B: 视觉感知 (按需运行)
     if should_see:
-        print("⚡ [Parallel] Running Perception & Psychology concurrently...")
+        logger.info("⚡ [Parallel] Running Perception & Psychology concurrently...")
         tasks.append(perception_node(state))
     else:
-        print("⚡ [Parallel] Running Psychology ONLY (Vision skipped).")
+        logger.info("⚡ [Parallel] Running Psychology ONLY (Vision skipped).")
 
     # 3. 并发执行
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -55,7 +59,7 @@ async def parallel_processing_node(state: AgentState) -> dict:
     if isinstance(psychology_res, dict):
         merged_update.update(psychology_res)
     else:
-        print(f"⚠️ [Parallel] Psychology failed: {psychology_res}")
+        logger.warning(f"⚠️ [Parallel] Psychology failed: {psychology_res}")
 
     # 处理视觉结果 (如果运行了的话)
     if should_see:
@@ -63,7 +67,7 @@ async def parallel_processing_node(state: AgentState) -> dict:
         if isinstance(perception_res, dict):
             merged_update.update(perception_res)
         else:
-            print(f"⚠️ [Parallel] Perception failed: {perception_res}")
+            logger.warning(f"⚠️ [Parallel] Perception failed: {perception_res}")
     else:
         # 如果没运行视觉，显式重置视觉状态，防止上一轮的残留干扰
         merged_update.update({

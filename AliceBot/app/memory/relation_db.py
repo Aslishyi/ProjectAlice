@@ -15,19 +15,23 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.database import Base, engine, SessionLocal, init_db
 
 # 配置日志
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # JSON文件路径（用于数据迁移）
-OLD_JSON_DB = "data/user_profiles.json"
+# 获取当前文件所在目录的父目录
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+OLD_JSON_DB = os.path.join(BASE_DIR, "data", "user_profiles.json")
 # 迁移完成标记文件
-MIGRATION_COMPLETE_FILE = "data/migration_complete.txt"
+MIGRATION_COMPLETE_FILE = os.path.join(BASE_DIR, "data", "migration_complete.txt")
 
 
 class Relationship(BaseModel):
     target_id: str
     relation_type: str = "acquaintance"
-    intimacy: int = Field(default=60, ge=0, le=100)
+    intimacy: int = Field(default=60, ge=0, le=100)  # 好感度
+    familiarity: int = Field(default=50, ge=0, le=100)  # 熟悉度
+    trust: int = Field(default=50, ge=0, le=100)  # 信任度
+    interest_match: int = Field(default=50, ge=0, le=100)  # 兴趣匹配度
     tags: List[str] = Field(default_factory=list)
     notes: str = ""
     nickname_for_user: str = ""
@@ -127,8 +131,56 @@ class GlobalRelationDB:
             except Exception as create_e:
                 logger.error(f"[RelationDB] 创建迁移标记文件失败: {str(create_e)}")
 
-    def get_user_profile(self, user_qq: str, current_name: str = None) -> UserProfile:
+    async def get_user_profile(self, user_qq: str, current_name: str = None) -> UserProfile:
+        from app.utils.cache import cached_user_info_get, cached_user_info_set
+        
         user_qq = str(user_qq)
+        
+        # 先检查缓存
+        cached_profile = await cached_user_info_get(user_qq)
+        if cached_profile:
+            # 检查cached_profile是否为字典，如果是则转换为UserProfile对象
+            if isinstance(cached_profile, dict):
+                # 从字典重建UserProfile对象
+                try:
+                    # 先提取relationship数据
+                    relationship_data = cached_profile.get("relationship", {})
+                    if isinstance(relationship_data, dict) and "target_id" not in relationship_data:
+                        relationship_data["target_id"] = user_qq
+                    
+                    cached_profile = UserProfile(
+                        name=cached_profile.get("name", f"User_{user_qq}"),
+                        qq_id=cached_profile.get("qq_id", user_qq),
+                        relationship=Relationship(**relationship_data)
+                    )
+                except Exception as e:
+                    logger.error(f"[RelationDB] 从字典转换UserProfile失败: {str(e)}")
+                    # 转换失败时，清除缓存并重新获取
+                    await cached_user_info_set(user_qq, None)
+                    cached_profile = None
+                    # 继续执行后续逻辑，从数据库获取
+            
+            if cached_profile:
+                # 如果用户名有更新，需要同步到数据库和缓存
+                if current_name and cached_profile.name != current_name:
+                    cached_profile.name = current_name
+                db = SessionLocal()
+                try:
+                    db_profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+                    if db_profile:
+                        # 只有当current_name不为None且不为空字符串时才更新用户名
+                        if current_name is not None and current_name.strip():
+                            db_profile.name = current_name
+                            db_profile.updated_at = str(time.time())
+                            db.commit()
+                            await cached_user_info_set(user_qq, cached_profile)
+                except SQLAlchemyError as e:
+                    db.rollback()
+                    logger.error(f"[RelationDB] 更新用户名失败: {str(e)}")
+                finally:
+                    db.close()
+            return cached_profile
+        
         db = SessionLocal()
         
         try:
@@ -148,12 +200,14 @@ class GlobalRelationDB:
                 )
                 
                 # 更新用户名
-                if current_name and profile.name != current_name:
+                if current_name is not None and current_name.strip() and profile.name != current_name:
                     db_profile.name = current_name
                     db_profile.updated_at = str(time.time())
                     db.commit()
                     profile.name = current_name
                 
+                # 存入缓存
+                await cached_user_info_set(user_qq, profile)
                 return profile
             else:
                 # 创建新用户
@@ -169,22 +223,29 @@ class GlobalRelationDB:
                 db.add(new_db_profile)
                 db.commit()
                 
-                return UserProfile(
+                profile = UserProfile(
                     name=display_name,
                     qq_id=user_qq,
                     relationship=relationship
                 )
+                
+                # 存入缓存
+                await cached_user_info_set(user_qq, profile)
+                return profile
                 
         except SQLAlchemyError as e:
             db.rollback()
             logger.error(f"[RelationDB] 获取用户资料失败: {str(e)}")
             # 出错时返回默认值
             display_name = current_name if current_name else f"User_{user_qq}"
-            return UserProfile(
+            profile = UserProfile(
                 name=display_name,
                 qq_id=user_qq,
                 relationship=Relationship(target_id=user_qq)
             )
+            # 存入缓存
+            await cached_user_info_set(user_qq, profile)
+            return profile
         finally:
             db.close()
 
@@ -228,6 +289,88 @@ class GlobalRelationDB:
             db.rollback()
             logger.error(f"[RelationDB] 更新亲密度失败: {str(e)}")
             return 60  # 出错时返回默认值
+        finally:
+            db.close()
+
+    def update_relationship_dimensions(self, user_qq: str, deltas: Dict[str, int]):
+        """
+        更新关系的多个维度（好感度、熟悉度、信任度、兴趣匹配等）
+        :param user_qq: 用户QQ号
+        :param deltas: 包含各个维度变化值的字典，例如：{"intimacy": 2, "familiarity": 1}
+        :return: 更新后的关系维度字典
+        """
+        user_qq = str(user_qq)
+        db = SessionLocal()
+        
+        try:
+            profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+            
+            if profile:
+                relationship_data = profile.relationship_data
+                if not relationship_data:
+                    relationship_data = {
+                        "target_id": user_qq,
+                        "intimacy": 60,
+                        "familiarity": 50,
+                        "trust": 50,
+                        "interest_match": 50
+                    }
+                
+                # 确保所有维度都有默认值
+                for dimension in ["intimacy", "familiarity", "trust", "interest_match"]:
+                    if dimension not in relationship_data:
+                        if dimension == "intimacy":
+                            relationship_data[dimension] = 60
+                        else:
+                            relationship_data[dimension] = 50
+                
+                # 更新各个维度
+                updated_dimensions = {}
+                for dimension, delta in deltas.items():
+                    if dimension in ["intimacy", "familiarity", "trust", "interest_match"]:
+                        current_value = relationship_data.get(dimension, 50)
+                        new_value = max(0, min(100, current_value + delta))
+                        relationship_data[dimension] = new_value
+                        updated_dimensions[dimension] = new_value
+                
+                profile.relationship_data = relationship_data
+                profile.updated_at = str(time.time())
+                db.commit()
+                
+                return updated_dimensions
+            else:
+                # 用户不存在，创建新用户
+                relationship_data = {
+                    "target_id": user_qq,
+                    "intimacy": 60,
+                    "familiarity": 50,
+                    "trust": 50,
+                    "interest_match": 50
+                }
+                
+                # 应用变化值
+                updated_dimensions = {}
+                for dimension, delta in deltas.items():
+                    if dimension in ["intimacy", "familiarity", "trust", "interest_match"]:
+                        new_value = max(0, min(100, relationship_data[dimension] + delta))
+                        relationship_data[dimension] = new_value
+                        updated_dimensions[dimension] = new_value
+                
+                new_profile = UserProfileModel(
+                    qq_id=user_qq,
+                    name=f"User_{user_qq}",
+                    relationship_data=relationship_data
+                )
+                
+                db.add(new_profile)
+                db.commit()
+                
+                return updated_dimensions
+                
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"[RelationDB] 更新关系维度失败: {str(e)}")
+            return {}
         finally:
             db.close()
 
