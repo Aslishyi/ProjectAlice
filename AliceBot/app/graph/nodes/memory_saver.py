@@ -99,7 +99,12 @@ async def memory_saver_node(state: AgentState):
         )
         
         # 使用缓存的LLM调用
-        resp = await cached_llm_invoke(llm, [SystemMessage(content=formatted_prompt)], temperature=llm.temperature)
+        resp = await cached_llm_invoke(
+            llm, 
+            [SystemMessage(content=formatted_prompt)], 
+            temperature=llm.temperature,
+            query_type="memory_extraction"
+        )
 
         raw_content = resp.content.strip().replace("```json", "").replace("```", "").strip()
         data = json.loads(raw_content)

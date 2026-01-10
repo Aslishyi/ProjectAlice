@@ -8,6 +8,7 @@ logger = logging.getLogger("VisionRouter")
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, BaseMessage, AIMessage
 from app.core.config import config
+from app.utils.cache import cached_llm_invoke
 
 # --- 优化后的路由策略 (Few-Shot Context Aware) ---
 ROUTER_SYSTEM_PROMPT = """你是 AI 代理的“视觉皮层”。
@@ -48,8 +49,8 @@ class VisionRouter:
         """
         if not messages: return False
 
-        # 1. 提取最近 3 条交互作为上下文 (避免 token 过多)
-        recent_msgs = messages
+        # 1. 提取最近 5 条交互作为上下文 (避免 token 过多)
+        recent_msgs = messages[-5:]  # 只取最近5条消息
 
         # 2. 构造 Prompt 输入
         # 将消息转为简单的文本描述，方便 Router 理解
@@ -67,7 +68,12 @@ class VisionRouter:
         ]
 
         try:
-            response = await self.llm.ainvoke(final_prompt)
+            response = await cached_llm_invoke(
+                self.llm, 
+                final_prompt,
+                temperature=0.0,  # VisionRouter应该使用确定性回答
+                query_type="vision_router"
+            )
             content = response.content.strip().replace("```json", "").replace("```", "")
             data = json.loads(content)
             result = data.get("needs_vision", False)

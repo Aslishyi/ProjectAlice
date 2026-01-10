@@ -244,7 +244,10 @@ def _build_system_prompt(now_dt: datetime, silence_str: str, emotion: Any,
     """
     构建系统提示
     """
+    from app.core.prompts import ALICE_CORE_PERSONA
+    
     return SOCIAL_VOLITION_PROMPT.format(
+        alice_core_persona=ALICE_CORE_PERSONA,
         current_time=now_dt.strftime("%H:%M"),
         time_period=_get_time_period(now_dt),
         silence_duration=silence_str,

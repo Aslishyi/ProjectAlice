@@ -10,6 +10,7 @@ from app.core.config import config
 from app.core.prompts import PSYCHOLOGY_ANALYSIS_PROMPT
 from app.core.global_store import global_store
 from app.memory.relation_db import relation_db
+from app.utils.cache import cached_llm_invoke
 
 llm = ChatOpenAI(
     model=config.SMALL_MODEL,
@@ -91,7 +92,12 @@ async def psychology_node(state: AgentState):
     )
 
     try:
-        response = await llm.ainvoke([SystemMessage(content=prompt)])
+        response = await cached_llm_invoke(
+            llm, 
+            [SystemMessage(content=prompt)],
+            temperature=0.3,  # 保持原有温度设置
+            query_type="psychology_analysis"
+        )
         raw_content = response.content.strip()
 
         data = {}

@@ -24,7 +24,7 @@ class LLMCache:
     用于缓存LLM调用的请求和响应，减少重复调用，提高性能
     """
     
-    def __init__(self, max_size: int = 1000, default_ttl: int = 3600, persist_file: Optional[str] = None, persist_interval: int = 60):
+    def __init__(self, max_size: int = 1000, default_ttl: int = 7200, persist_file: Optional[str] = None, persist_interval: int = 300):
         """
         初始化缓存系统
         
@@ -48,6 +48,23 @@ class LLMCache:
         self.persist_file = persist_file
         self.persist_interval = persist_interval
         self.last_persist_time = datetime.now()
+        
+        # 缓存策略配置
+        self.ttl_overrides: Dict[str, int] = {
+            # 为不同类型的请求设置不同的TTL
+            "simple_query": 3600,  # 简单查询缓存1小时
+            "complex_query": 1800,  # 复杂查询缓存30分钟
+            "creative_query": 600,  # 创造性查询缓存10分钟
+            "group_chat": 1800,  # 群聊消息缓存30分钟
+            "private_chat": 3600,  # 私聊消息缓存1小时
+            "mention_response": 1200,  # 被@回复缓存20分钟
+            "generic_response": 300,  # 通用响应缓存5分钟
+            # 新增组件特定的缓存策略
+            "context_filter": 3600,  # ContextFilter结果缓存1小时（确定性决策）
+            "vision_router": 1800,  # VisionRouter结果缓存30分钟（视觉判断）
+            "psychology_analysis": 1200,  # Psychology分析结果缓存20分钟（情绪分析）
+            "memory_extraction": 3600  # 记忆提取结果缓存1小时（用户信息提取）
+        }
         
         # 如果配置了持久化文件，尝试从磁盘加载
         if self.persist_file:
@@ -87,7 +104,7 @@ class LLMCache:
                 
                 self.cache[key] = (value, expire_time)
     
-    def _generate_key(self, messages: List[BaseMessage], model: str, temperature: float) -> str:
+    def _generate_key(self, messages: List[BaseMessage], model: str, temperature: float, query_type: str = "default") -> str:
         """
         根据输入消息生成唯一的缓存键
         
@@ -95,6 +112,7 @@ class LLMCache:
             messages: LLM调用的输入消息列表
             model: 使用的模型名称
             temperature: 模型的温度参数
+            query_type: 查询类型，用于区分不同的缓存策略
             
         Returns:
             唯一的缓存键字符串
@@ -109,18 +127,19 @@ class LLMCache:
             }
             message_data.append(msg_data)
         
-        # 添加模型和温度参数
+        # 添加模型、温度参数和查询类型
         cache_key_data = {
             "messages": message_data,
             "model": model,
             "temperature": temperature,
+            "query_type": query_type
         }
         
         # 使用msgpack替代json序列化，提高性能
         cache_key_bytes = msgpack.packb(cache_key_data, use_bin_type=True)
         return hashlib.sha256(cache_key_bytes).hexdigest()
     
-    async def get(self, messages: List[BaseMessage], model: str, temperature: float) -> Optional[Any]:
+    async def get(self, messages: List[BaseMessage], model: str, temperature: float, query_type: str = "default") -> Optional[Any]:
         """
         从缓存中获取LLM调用结果
         
@@ -128,11 +147,12 @@ class LLMCache:
             messages: LLM调用的输入消息列表
             model: 使用的模型名称
             temperature: 模型的温度参数
+            query_type: 查询类型，用于区分不同的缓存策略
             
         Returns:
             缓存的LLM响应，如果没有缓存或已过期则返回None
         """
-        cache_key = self._generate_key(messages, model, temperature)
+        cache_key = self._generate_key(messages, model, temperature, query_type)
         
         async with self.lock:
             self.total_requests += 1
@@ -147,7 +167,7 @@ class LLMCache:
             self.misses += 1
             return None
     
-    async def set(self, messages: List[BaseMessage], model: str, temperature: float, value: Any, ttl: Optional[int] = None) -> None:
+    async def set(self, messages: List[BaseMessage], model: str, temperature: float, value: Any, ttl: Optional[int] = None, query_type: str = "default") -> None:
         """
         将LLM调用结果存入缓存
         
@@ -156,10 +176,21 @@ class LLMCache:
             model: 使用的模型名称
             temperature: 模型的温度参数
             value: LLM的响应结果
-            ttl: 缓存过期时间（秒），如果为None则使用默认值
+            ttl: 缓存过期时间（秒），如果为None则使用默认值或根据query_type选择
+            query_type: 查询类型，用于区分不同的缓存策略
         """
-        cache_key = self._generate_key(messages, model, temperature)
-        expire_time = datetime.now() + timedelta(seconds=ttl or self.default_ttl)
+        # 选择合适的TTL
+        if ttl is None:
+            ttl = self.ttl_overrides.get(query_type, self.default_ttl)
+            
+            # 对于创造性内容，即使没有指定query_type，也使用较短的TTL
+            if temperature > 0.8:
+                ttl = min(ttl, 600)  # 最多缓存10分钟
+            elif temperature > 0.5:
+                ttl = min(ttl, 1800)  # 最多缓存30分钟
+        
+        cache_key = self._generate_key(messages, model, temperature, query_type)
+        expire_time = datetime.now() + timedelta(seconds=ttl)
         
         async with self.lock:
             # 如果条目已存在，先移除（会自动移到末尾）
@@ -303,7 +334,7 @@ class LLMRequestQueue:
     用于管理LLM调用请求，控制并发数，防止请求堆积和超时
     """
     
-    def __init__(self, max_concurrent: int = 5, timeout: int = 30):
+    def __init__(self, max_concurrent: int = 15, timeout: int = 60):
         """
         初始化请求队列
         
@@ -318,6 +349,10 @@ class LLMRequestQueue:
         self.lock = asyncio.Lock()
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self.pending_requests: Dict[str, List[asyncio.Future]] = {}  # 存储正在处理的请求
+        
+        # 请求合并优化
+        self.merge_window = 0.5  # 请求合并窗口（秒）
+        self.last_request_time: Dict[str, float] = {}  # 记录每个请求键的最后请求时间
         
         # 统计信息
         self.total_requests = 0
@@ -493,38 +528,38 @@ class LLMRequestQueue:
 
 # 全局缓存实例
 llm_cache = LLMCache(
-    max_size=500, 
-    default_ttl=7200,  # 缓存500条，默认过期时间2小时
+    max_size=1000,  # 增加缓存大小到1000条
+    default_ttl=7200,  # 缓存默认过期时间2小时
     persist_file=os.path.join(cache_dir, "llm_cache.msgpack"),  # 缓存持久化文件路径
-    persist_interval=60  # 每分钟自动持久化一次
+    persist_interval=300  # 每5分钟自动持久化一次，减少IO操作
 )
 
 # 用户信息缓存
 user_cache = LLMCache(
-    max_size=1000, 
-    default_ttl=86400,  # 缓存1000个用户信息，默认过期时间1天
+    max_size=2000,  # 增加用户信息缓存到2000个
+    default_ttl=86400,  # 缓存1天
     persist_file=os.path.join(cache_dir, "user_cache.msgpack")
 )
 
 # 上下文缓存
 context_cache = LLMCache(
-    max_size=1000, 
-    default_ttl=1800,  # 缓存1000个上下文，默认过期时间30分钟
+    max_size=2000,  # 增加上下文缓存到2000个
+    default_ttl=1800,  # 缓存30分钟
     persist_file=os.path.join(cache_dir, "context_cache.msgpack")
 )
 
 # 工具调用结果缓存
 tool_cache = LLMCache(
-    max_size=2000, 
-    default_ttl=3600,  # 缓存2000个工具调用结果，默认过期时间1小时
+    max_size=4000,  # 增加工具调用缓存到4000个
+    default_ttl=3600,  # 缓存1小时
     persist_file=os.path.join(cache_dir, "tool_cache.msgpack")
 )
 
 # 全局请求队列实例
-llm_queue = LLMRequestQueue(max_concurrent=5, timeout=60)  # 增加并发数到5，提高并行处理能力
+llm_queue = LLMRequestQueue(max_concurrent=15, timeout=60)  # 增加并发数到15，提高并行处理能力
 
 
-async def cached_llm_invoke(llm: Any, messages: List[BaseMessage], temperature: float = 0.7, max_retries: int = 2) -> Any:
+async def cached_llm_invoke(llm: Any, messages: List[BaseMessage], temperature: float = 0.7, max_retries: int = 2, query_type: str = "default", conversation_type: str = "private") -> Any:
     """
     带缓存和错误处理的LLM调用函数
     
@@ -533,6 +568,8 @@ async def cached_llm_invoke(llm: Any, messages: List[BaseMessage], temperature: 
         messages: 输入消息列表
         temperature: 温度参数
         max_retries: 最大重试次数
+        query_type: 查询类型，用于区分不同的缓存策略
+        conversation_type: 对话类型，用于优化缓存策略（group/private）
         
     Returns:
         LLM响应结果（可能来自缓存）
@@ -540,13 +577,37 @@ async def cached_llm_invoke(llm: Any, messages: List[BaseMessage], temperature: 
     Raises:
         Exception: 如果所有重试都失败，抛出最终异常
     """
+    # 自动判断查询类型
+    auto_query_type = query_type
+    if auto_query_type == "default":
+        # 检查是否为群聊被@的情况
+        last_msg = messages[-1] if messages else None
+        if isinstance(last_msg, HumanMessage):
+            content = str(last_msg.content)
+            # 检查是否包含@标记
+            if "@" in content or "CQ:at" in content:
+                auto_query_type = "mention_response"
+            # 简单判断消息复杂度
+            elif len(content) < 50:
+                auto_query_type = "simple_query"
+            elif len(content) > 200:
+                auto_query_type = "complex_query"
+            else:
+                auto_query_type = "generic_response"
+        
+        # 根据对话类型调整查询类型
+        if conversation_type == "group":
+            auto_query_type = f"group_{auto_query_type}"
+        else:
+            auto_query_type = f"private_{auto_query_type}"
+    
     # 获取模型名称
     model = getattr(llm, "model", "unknown")
     
     # 尝试从缓存获取
-    cached_result = await llm_cache.get(messages, model, temperature)
+    cached_result = await llm_cache.get(messages, model, temperature, auto_query_type)
     if cached_result:
-        logger.debug(f"LLM调用缓存命中，模型: {model}")
+        logger.debug(f"LLM调用缓存命中，模型: {model}, 查询类型: {auto_query_type}")
         return cached_result
     
     # 缓存未命中，尝试调用LLM
@@ -555,15 +616,15 @@ async def cached_llm_invoke(llm: Any, messages: List[BaseMessage], temperature: 
     
     while retry_count <= max_retries:
         try:
-            logger.debug(f"LLM调用缓存未命中，尝试调用，模型: {model}, 重试次数: {retry_count}")
+            logger.debug(f"LLM调用缓存未命中，尝试调用，模型: {model}, 查询类型: {auto_query_type}, 重试次数: {retry_count}")
             
             # 通过请求队列调用LLM
             result = await llm_queue.add_request(llm, messages, temperature)
             
             # 将结果存入缓存
-            await llm_cache.set(messages, model, temperature, result)
+            await llm_cache.set(messages, model, temperature, result, query_type=auto_query_type)
             
-            logger.debug(f"LLM调用成功，模型: {model}")
+            logger.debug(f"LLM调用成功，模型: {model}, 查询类型: {auto_query_type}")
             return result
             
         except asyncio.TimeoutError as e:
@@ -583,7 +644,9 @@ async def cached_llm_invoke(llm: Any, messages: List[BaseMessage], temperature: 
         
         # 重试前等待一段时间，避免立即重试
         if retry_count <= max_retries:
-            await asyncio.sleep(1)  # 等待1秒后重试
+            # 使用指数退避算法
+            wait_time = 2 ** retry_count  # 1, 2, 4秒
+            await asyncio.sleep(wait_time)
     
     # 所有重试都失败
     logger.error(f"LLM调用在{max_retries+1}次尝试后失败: {str(last_exception)}")

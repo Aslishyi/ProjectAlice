@@ -10,9 +10,10 @@ from datetime import datetime
 logger = logging.getLogger("ContextFilter")
 
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, HumanMessage
 from app.core.state import AgentState
 from app.core.config import config
+from app.utils.cache import cached_llm_invoke
 
 
 # ==============================================================================
@@ -223,7 +224,16 @@ async def context_filter_node(state: AgentState):
             has_image=str(has_img)
         )
 
-        resp = await llm.ainvoke([SystemMessage(content=prompt)])
+        # 使用带缓存的LLM调用
+        conversation_type = "group" if is_group else "private"
+        resp = await cached_llm_invoke(
+            llm, 
+            [SystemMessage(content=prompt)],
+            temperature=0.0,  # Filter应该使用确定性回答
+            conversation_type=conversation_type,
+            query_type="context_filter"
+        )
+        
         # 处理resp可能是字符串的情况
         if isinstance(resp, str):
             raw_content = resp.strip()

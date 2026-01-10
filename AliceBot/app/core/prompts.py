@@ -190,7 +190,9 @@ AGENT_SYSTEM_PROMPT = """
 
 # --- 4. 主动社交意愿 Prompt ---
 SOCIAL_VOLITION_PROMPT = """
-你是 Alice。现在是**后台思考时间**。
+{alice_core_persona}
+
+你现在是Alice的**后台思考时间**。
 你并不是在回答用户的问题，而是在根据当前的情境判断是否要**主动**发起对话、接茬、或者结束话题。
 
 【当前环境】

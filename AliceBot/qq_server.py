@@ -5,7 +5,7 @@ import logging
 import warnings
 import builtins
 from langchain_core._api.deprecation import LangChainDeprecationWarning
-
+from datetime import datetime
 # 添加调试日志
 import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -114,41 +114,210 @@ session_manager = SessionManager()
 
 
 class MessageBuffer:
-    # ... (保持原样，未修改) ...
-    def __init__(self, wait_time=1.5):
-        self.wait_time = wait_time
+    """
+    增强版消息批处理器
+    支持基于时间和数量的双重批处理条件，以及不同会话类型的智能策略
+    """
+    def __init__(self):
+        # 基础配置
         self.buffers = {}
         self.lock = asyncio.Lock()
+        
+        # 批处理策略配置
+        self.strategies = {
+            "group": {
+                "wait_time": 0.8,  # 群聊等待时间更短，提高响应速度
+                "max_batch_size": 15,  # 群聊可以合并更多消息
+                "max_wait_time": 2.5,  # 最长等待时间，防止消息延迟过高
+                "same_user_merge_window": 30,  # 同一用户消息合并窗口（秒）
+                "batch_merge_window": 2  # 批次合并窗口（秒）
+            },
+            "private": {
+                "wait_time": 1.5,  # 私聊可以等待更长时间，提高合并效果
+                "max_batch_size": 8,  # 私聊合并较少消息，保持对话流畅
+                "max_wait_time": 5.0,  # 最长等待时间
+                "same_user_merge_window": 60,  # 同一用户消息合并窗口（秒）
+                "batch_merge_window": 3  # 批次合并窗口（秒）
+            }
+        }
+
+    def _get_session_type(self, session_id: str) -> str:
+        """根据会话ID判断会话类型"""
+        if session_id.startswith("group_"):
+            return "group"
+        elif session_id.startswith("private_"):
+            return "private"
+        return "private"  # 默认按私聊处理
+
+    def _get_strategy(self, session_id: str) -> dict:
+        """获取会话的批处理策略"""
+        session_type = self._get_session_type(session_id)
+        return self.strategies[session_type]
 
     async def add(self, session_id: str, message_data: dict, callback):
         async with self.lock:
+            # 初始化会话缓冲区
             if session_id not in self.buffers:
-                self.buffers[session_id] = {"msgs": [], "task": None}
-            if self.buffers[session_id]["task"]:
-                self.buffers[session_id]["task"].cancel()
+                strategy = self._get_strategy(session_id)
+                self.buffers[session_id] = {
+                    "msgs": [],
+                    "task": None,
+                    "strategy": strategy,
+                    "start_time": datetime.now()  # 记录批次开始时间
+                }
 
-            self.buffers[session_id]["msgs"].append(message_data)
-            self.buffers[session_id]["task"] = asyncio.create_task(
+            buffer = self.buffers[session_id]
+            buffer["msgs"].append(message_data)
+
+            # 如果任务已经存在，取消它
+            if buffer["task"]:
+                buffer["task"].cancel()
+
+            # 检查是否达到最大批次大小
+            if len(buffer["msgs"]) >= buffer["strategy"]["max_batch_size"]:
+                # 立即处理批次
+                msgs = buffer["msgs"]
+                del self.buffers[session_id]
+                asyncio.create_task(self._process_batch(session_id, msgs, callback))
+                return
+
+            # 检查是否超过最长等待时间
+            elapsed_time = (datetime.now() - buffer["start_time"]).total_seconds()
+            if elapsed_time >= buffer["strategy"]["max_wait_time"]:
+                # 立即处理批次
+                msgs = buffer["msgs"]
+                del self.buffers[session_id]
+                asyncio.create_task(self._process_batch(session_id, msgs, callback))
+                return
+
+            # 创建新的延迟处理任务
+            buffer["task"] = asyncio.create_task(
                 self._flush_timer(session_id, callback)
             )
 
     async def _flush_timer(self, session_id, callback):
         try:
-            await asyncio.sleep(self.wait_time)
+            async with self.lock:
+                if session_id not in self.buffers:
+                    return
+                # 获取会话的等待时间
+                wait_time = self.buffers[session_id]["strategy"]["wait_time"]
+            
+            await asyncio.sleep(wait_time)
+            
             async with self.lock:
                 if session_id in self.buffers:
                     msgs = self.buffers[session_id]["msgs"]
                     del self.buffers[session_id]
-                    asyncio.create_task(callback(session_id, msgs))
+                    await self._process_batch(session_id, msgs, callback)
         except asyncio.CancelledError:
             pass
+
+    async def _process_batch(self, session_id: str, msgs: list, callback):
+        """处理消息批次，根据会话类型进行优化"""
+        session_type = self._get_session_type(session_id)
+        if session_type == "group":
+            # 群聊场景下的优化处理
+            optimized_msgs = self._optimize_group_messages(msgs)
+            await callback(session_id, optimized_msgs)
+        else:
+            # 私聊场景直接处理
+            await callback(session_id, msgs)
+
+    def _optimize_group_messages(self, messages: list) -> list:
+        """
+        群聊消息优化：
+        1. 合并同一用户的连续消息
+        2. 按用户分组处理不同用户的消息
+        3. 保留消息的时间顺序
+        """
+        if not messages:
+            return []
+
+        # 按用户ID分组并保留时间顺序
+        user_groups = {}
+        # 按时间排序消息
+        sorted_messages = sorted(messages, key=lambda x: x["time"])
+        
+        for msg in sorted_messages:
+            user_id = msg["sender"]["user_id"]
+            if user_id not in user_groups:
+                user_groups[user_id] = []
+            user_groups[user_id].append(msg)
+
+        optimized = []
+        
+        # 对每个用户的消息进行合并
+        for user_id, user_msgs in user_groups.items():
+            if not user_msgs:
+                continue
+                
+            # 合并同一用户的连续消息
+            merged_user_messages = []
+            current_batch = [user_msgs[0]]
+            
+            for msg in user_msgs[1:]:
+                time_diff = msg["time"] - current_batch[-1]["time"]
+                if time_diff < self.strategies["group"]["same_user_merge_window"]:
+                    current_batch.append(msg)
+                else:
+                    # 合并当前批次
+                    merged_msg = self._merge_messages(current_batch)
+                    merged_user_messages.append(merged_msg)
+                    current_batch = [msg]
+            
+            # 处理最后一个批次
+            if current_batch:
+                merged_msg = self._merge_messages(current_batch)
+                merged_user_messages.append(merged_msg)
+            
+            optimized.extend(merged_user_messages)
+        
+        # 按时间顺序重新排序所有合并后的消息
+        optimized.sort(key=lambda x: x["time"])
+        
+        return optimized
+
+    def _merge_messages(self, messages: list) -> dict:
+        """
+        合并多条消息为一条
+        """
+        if not messages:
+            return {}
+        elif len(messages) == 1:
+            return messages[0]
+        
+        # 创建合并后的消息
+        merged_msg = messages[0].copy()
+        merged_content = ""
+        all_images = []
+        
+        for msg in messages:
+            content, images, _ = parse_onebot_array_msg(msg.get("message", ""))
+            if content:
+                merged_content += content + " "
+            all_images.extend(images)
+        
+        # 构建合并后的消息内容
+        final_content = merged_content.strip()
+        
+        # 如果有图片，添加图片信息
+        if all_images:
+            final_content += " [图片]"
+        
+        merged_msg["message"] = final_content
+        merged_msg["time"] = messages[0]["time"]  # 保留最早的时间戳
+        merged_msg["is_merged"] = True  # 标记为合并消息
+        merged_msg["merged_count"] = len(messages)  # 记录合并的消息数量
+        
+        return merged_msg
 
 
 class QQBotManager:
     def __init__(self):
         self.connections: dict[str, WebSocket] = {}
         self.graph = build_graph()
-        self.msg_buffer = MessageBuffer(wait_time=1.5)
+        self.msg_buffer = MessageBuffer()
         self.api_futures: dict[str, asyncio.Future] = {}
         # 增加一个锁，防止同一个 Session 同时运行 Reactive 和 Proactive 导致混乱
         self.session_locks: dict[str, asyncio.Lock] = {}
@@ -613,7 +782,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ProjectAlice QQ Server")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="服务器主机地址")
     parser.add_argument("--port", type=int, default=6199, help="服务器端口")
-    parser.add_argument("--workers", type=int, default=4, help="工作进程数，默认根据CPU核心数自动调整")
+    parser.add_argument("--workers", type=int, default=1, help="工作进程数，默认根据CPU核心数自动调整")
     args = parser.parse_args()
     
     # 启用多进程模式，利用多核CPU提高性能

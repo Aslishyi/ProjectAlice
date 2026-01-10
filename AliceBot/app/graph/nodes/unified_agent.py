@@ -145,14 +145,20 @@ async def agent_node(state: AgentState):
 
     # 构造 Prompt
     format_instruction = """
-        Response Format:
-        You must output a VALID JSON object.
-        {
-          "monologue": "thought",
-          "action": "reply",
-          "args": "",
-          "response": "text"
-        }
+    # 强制响应格式要求
+    YOU MUST OUTPUT A VALID JSON OBJECT ONLY. NO OTHER TEXT OR EXPLANATION ALLOWED.
+    YOU WILL BE PUNISHED IF YOU FAIL TO FOLLOW THIS INSTRUCTION.
+    
+    Response Format:
+    {
+      "monologue": "你的内部思考过程",
+      "action": "reply",
+      "args": "",
+      "response": "要发送给用户的回复内容"
+    }
+    
+    Example:
+    {"monologue": "用户问我喜欢什么颜色，我应该回答蓝色", "action": "reply", "args": "", "response": "我喜欢蓝色"}
     """
 
     # 获取情绪和关系数据
@@ -244,7 +250,15 @@ async def agent_node(state: AgentState):
     # 调用 LLM
     parsed = {"action": "reply", "response": "..."}
     try:
-        response = await cached_llm_invoke(llm, input_messages, temperature=llm.temperature)
+        # 自动判断对话类型
+        conversation_type = "group" if "group" in str(state.get("session_id", "")) else "private"
+        
+        response = await cached_llm_invoke(
+            llm, 
+            input_messages, 
+            temperature=llm.temperature,
+            conversation_type=conversation_type
+        )
         # 处理response可能是字符串的情况
         if isinstance(response, str):
             content = response.strip()
