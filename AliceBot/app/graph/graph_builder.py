@@ -59,12 +59,16 @@ def route_filter(state: AgentState) -> str:
     Returns:
         str: 下一个节点的名称
     """
-    if state.get("should_reply", False):
-        # 只有需要回复时，才进行复杂的感知和推理
-        return "parallel_processor"
-    else:
+    if not state.get("should_reply", False):
         # 不需要回复时，直接保存记忆并结束
         return "summarizer"
+    
+    # 如果有短路回复字段，直接传递到agent_node，避免复杂的感知和推理
+    if "short_circuit_emoji" in state or "short_circuit_text" in state:
+        return "agent"
+    
+    # 需要回复且没有短路字段时，进行复杂的感知和推理
+    return "parallel_processor"
 
 
 def build_graph():
@@ -111,7 +115,8 @@ def build_graph():
         route_filter,
         {
             "parallel_processor": "parallel_processor",  # 需要回复：进行并行处理
-            "summarizer": "summarizer"                # 不需要回复：直接保存记忆
+            "summarizer": "summarizer",                # 不需要回复：直接保存记忆
+            "agent": "agent"                        # 短路回复：直接传递到智能体
         }
     )
 

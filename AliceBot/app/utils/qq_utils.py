@@ -452,6 +452,21 @@ def parse_onebot_array_msg(message_data: list | dict) -> Tuple[str, List[str], O
     # Compat: if a single dict is provided, wrap it
     if isinstance(message_data, dict):
         message_data = [message_data]
+    
+    # 处理字符串形式的特殊消息标记
+    if isinstance(message_data, str):
+        # 处理常见的字符串形式的合并转发消息
+        if "[forward]" in message_data or "[转发消息]" in message_data:
+            return "[合并转发消息]", [], None
+        # 处理普通文本消息
+        # 检查是否包含图片标记
+        import re
+        img_urls = []
+        # 尝试从字符串中提取图片URL（部分OneBot实现可能会将图片以URL形式嵌入文本）
+        img_matches = re.findall(r'https?://[^]+\.(?:jpg|jpeg|png|gif|bmp|webp)', message_data)
+        if img_matches:
+            img_urls = [url.strip() for url in img_matches]
+        return message_data, img_urls, None
 
     if not isinstance(message_data, list):
         return "", [], None
@@ -469,7 +484,13 @@ def parse_onebot_array_msg(message_data: list | dict) -> Tuple[str, List[str], O
         # Text
         # ---------------------------
         if msg_type == "text":
-            text_content += str(data.get("text", ""))
+            text = str(data.get("text", ""))
+            # 检查文本中是否包含中文的[转发消息]标记
+            if "[转发消息]" in text:
+                # 处理中文格式的合并转发消息标记
+                text_content += "[合并转发消息]"
+            else:
+                text_content += text
             continue
 
         # ---------------------------
@@ -574,6 +595,67 @@ def parse_onebot_array_msg(message_data: list | dict) -> Tuple[str, List[str], O
 
         if msg_type == "xml":
             text_content += " [XML消息] "
+            continue
+
+        # ---------------------------
+        # 合并转发消息
+        # ---------------------------
+        if msg_type == "forward":
+            # 获取转发消息ID（用于通过API获取实际内容）
+            forward_id = data.get("id") or data.get("forward_id")
+            
+            # 提取合并转发的消息内容
+            forward_content = data.get("content", "")
+            
+            if forward_content:
+                try:
+                    # 解析合并转发内容（可能是JSON字符串或对象）
+                    if isinstance(forward_content, str):
+                        import json
+                        forward_data = json.loads(forward_content)
+                    else:
+                        forward_data = forward_content
+                    
+                    # 递归解析转发的消息
+                    if "messages" in forward_data:
+                        # 遍历转发的每条消息
+                        for forward_msg in forward_data["messages"]:
+                            if isinstance(forward_msg, dict):
+                                # 解析单条转发消息
+                                sender_name = forward_msg.get("sender", {}).get("name", "未知用户")
+                                forward_text, forward_images, _ = parse_onebot_array_msg(forward_msg.get("message", []))
+                                
+                                if forward_text:
+                                    text_content += f"\n【{sender_name}】: {forward_text}"
+                                # 检查文本中是否已经包含图片标记，避免重复
+                                if forward_images and "[图片]" not in forward_text:
+                                    text_content += f" [{len(forward_images)}张图片]"
+                    elif isinstance(forward_data, list):
+                        # 直接处理消息列表
+                        forward_text, forward_images, _ = parse_onebot_array_msg(forward_data)
+                        if forward_text:
+                            text_content += f"\n【转发消息】: {forward_text}"
+                        # 检查文本中是否已经包含图片标记，避免重复
+                        if forward_images and "[图片]" not in forward_text:
+                            text_content += f" [{len(forward_images)}张图片]"
+                    else:
+                        # 如果内容存在但格式不支持，添加转发ID信息以便后续处理
+                        if forward_id:
+                            text_content += f" [合并转发消息(ID:{forward_id})]"
+                        else:
+                            text_content += " [合并转发消息]"
+                except Exception as e:
+                    # 如果解析失败，显示占位符
+                    if forward_id:
+                        text_content += f" [合并转发消息(ID:{forward_id})]"
+                    else:
+                        text_content += " [合并转发消息]"
+            else:
+                # 如果没有内容但有转发ID，添加ID信息
+                if forward_id:
+                    text_content += f" [合并转发消息(ID:{forward_id})]"
+                else:
+                    text_content += " [合并转发消息]"
             continue
 
         # Fallback: preserve unknown segment types

@@ -35,8 +35,17 @@ async def psychology_node(state: AgentState):
     msgs = state.get("messages", [])
     if not msgs: return {}
 
+    # 获取最后一条消息内容
     last_msg = msgs[-1].content
     if isinstance(last_msg, list): last_msg = "[多模态图片/文件]"
+
+    # 构建对话历史（最近5条消息）
+    conversation_history = ""
+    for i, msg in enumerate(msgs[-5:], 1):
+        role = "User" if hasattr(msg, "type") and msg.type == "human" else "Alice"
+        content = msg.content
+        if isinstance(content, list): content = "[多模态图片/文件]"
+        conversation_history += f"{i}. {role}: {content}\n"
 
     g_emotion = global_store.get_emotion_snapshot()
 
@@ -75,7 +84,7 @@ async def psychology_node(state: AgentState):
 
     rel_desc = get_relation_desc(rel.intimacy, rel.familiarity, rel.trust, rel.interest_match)
 
-    # 5. 构造 Prompt
+    # 5. 构造 Prompt - 添加对话历史和用户关系的更多维度
     prompt = PSYCHOLOGY_ANALYSIS_PROMPT.format(
         current_mood=g_emotion.primary_emotion,
         valence=g_emotion.valence,
@@ -88,7 +97,11 @@ async def psychology_node(state: AgentState):
         trust=rel.trust,
         interest_match=rel.interest_match,
         relation_desc=rel_desc,
-        user_input=last_msg
+        user_input=last_msg,
+        conversation_history=conversation_history,
+        communication_style=rel.communication_style,
+        favorite_topics=", ".join(rel.favorite_topics) if rel.favorite_topics else "无",
+        avoid_topics=", ".join(rel.avoid_topics) if rel.avoid_topics else "无"
     )
 
     try:

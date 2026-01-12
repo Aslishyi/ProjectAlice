@@ -5,6 +5,7 @@ import os
 import asyncio
 import logging
 import time
+import random
 from typing import Dict, Any, List, Union, Optional
 from pydantic import BaseModel, Field
 from sqlalchemy import Column, Integer, String, Text, JSON
@@ -35,6 +36,16 @@ class Relationship(BaseModel):
     tags: List[str] = Field(default_factory=list)
     notes: str = ""
     nickname_for_user: str = ""
+    memory_points: List[str] = Field(default_factory=list)  # 记忆点列表，格式：category:content:weight:timestamp
+    expression_habits: List[str] = Field(default_factory=list)  # 表达习惯列表
+    group_nicknames: List[Dict[str, str]] = Field(default_factory=list)  # 群昵称列表，每个元素包含group_id和nickname
+    
+    # 新增字段
+    communication_style: str = "casual"  # 沟通风格: casual, formal, playful
+    favorite_topics: List[str] = Field(default_factory=list)  # 感兴趣的话题
+    avoid_topics: List[str] = Field(default_factory=list)  # 避免的话题
+    interaction_patterns: Dict[str, Any] = Field(default_factory=dict)  # 交互模式（如回复时间偏好）
+    sentiment_trends: List[Dict[str, Any]] = Field(default_factory=list)  # 情感变化趋势
 
 
 class UserProfile(BaseModel):
@@ -60,6 +71,333 @@ class GlobalRelationDB:
         
         # 检查是否需要从JSON迁移数据
         self._migrate_from_json()
+    
+    def calculate_memory_point_weight(self, memory_content: str, interaction_count: int = 1, recency: int = 1) -> float:
+        """
+        计算记忆点权重
+        
+        Args:
+            memory_content: 记忆内容
+            interaction_count: 互动次数
+            recency: 时间衰减因子（1表示最新，值越大越旧）
+            
+        Returns:
+            计算后的权重
+        """
+        # 基础权重
+        base_weight = 1.0
+        
+        # 内容长度权重（越长的内容权重可能越高）
+        content_weight = min(2.0, 1.0 + len(memory_content) / 100)
+        
+        # 互动次数权重
+        interaction_weight = min(3.0, 1.0 + interaction_count * 0.5)
+        
+        # 时间衰减权重
+        recency_weight = max(0.1, 1.0 - (recency - 1) * 0.1)
+        
+        # 综合权重
+        total_weight = base_weight * content_weight * interaction_weight * recency_weight
+        return round(total_weight, 2)
+    
+    def analyze_communication_style(self, message_content: str) -> str:
+        """
+        分析用户的沟通风格
+        
+        Args:
+            message_content: 用户消息内容
+            
+        Returns:
+            沟通风格（casual, formal, playful）
+        """
+        # 简单的沟通风格分析
+        casual_words = ["哈哈", "嘿嘿", "嗯嗯", "哦哦", "呀", "呢", "啦", "哒", "哦", "啊"]
+        formal_words = ["您好", "请问", "感谢", "谢谢", "请", "贵", "令"]
+        playful_words = ["^_^", "😄", "😁", "😃", "😂", "😆", "😊", "😉", "😋", "😎"]
+        
+        # 计算各种风格的得分
+        casual_score = sum(1 for word in casual_words if word in message_content)
+        formal_score = sum(1 for word in formal_words if word in message_content)
+        playful_score = sum(1 for word in playful_words if word in message_content)
+        
+        # 根据得分确定风格
+        scores = {
+            "casual": casual_score,
+            "formal": formal_score,
+            "playful": playful_score
+        }
+        
+        # 返回得分最高的风格
+        return max(scores, key=scores.get)
+    
+    def update_communication_style(self, user_qq: str, style: str) -> bool:
+        """
+        更新用户的沟通风格
+        
+        Args:
+            user_qq: 用户QQ号
+            style: 沟通风格（casual, formal, playful）
+            
+        Returns:
+            bool: 是否更新成功
+        """
+        user_qq = str(user_qq)
+        db = SessionLocal()
+        
+        try:
+            profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+            
+            if profile:
+                relationship_data = profile.relationship_data
+                if not relationship_data:
+                    relationship_data = {"target_id": user_qq}
+                
+                relationship_data["communication_style"] = style
+                profile.relationship_data = relationship_data
+                profile.updated_at = str(time.time())
+                db.commit()
+                return True
+            else:
+                # 用户不存在，创建新用户
+                relationship = Relationship(target_id=user_qq, communication_style=style)
+                new_profile = UserProfileModel(
+                    qq_id=user_qq,
+                    name=f"User_{user_qq}",
+                    relationship_data=relationship.model_dump()
+                )
+                
+                db.add(new_profile)
+                db.commit()
+                return True
+                
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"[RelationDB] 更新沟通风格失败: {str(e)}")
+            return False
+        finally:
+            db.close()
+    
+    def add_favorite_topic(self, user_qq: str, topic: str) -> bool:
+        """
+        添加用户感兴趣的话题
+        
+        Args:
+            user_qq: 用户QQ号
+            topic: 感兴趣的话题
+            
+        Returns:
+            bool: 是否添加成功
+        """
+        user_qq = str(user_qq)
+        db = SessionLocal()
+        
+        try:
+            profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+            
+            if profile:
+                relationship_data = profile.relationship_data
+                if not relationship_data:
+                    relationship_data = {"target_id": user_qq, "favorite_topics": []}
+                
+                if "favorite_topics" not in relationship_data:
+                    relationship_data["favorite_topics"] = []
+                
+                if topic not in relationship_data["favorite_topics"]:
+                    relationship_data["favorite_topics"].append(topic)
+                    profile.relationship_data = relationship_data
+                    profile.updated_at = str(time.time())
+                    db.commit()
+                
+                return True
+            else:
+                # 用户不存在，创建新用户
+                relationship = Relationship(target_id=user_qq, favorite_topics=[topic])
+                new_profile = UserProfileModel(
+                    qq_id=user_qq,
+                    name=f"User_{user_qq}",
+                    relationship_data=relationship.model_dump()
+                )
+                
+                db.add(new_profile)
+                db.commit()
+                return True
+                
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"[RelationDB] 添加感兴趣话题失败: {str(e)}")
+            return False
+        finally:
+            db.close()
+    
+    def add_avoid_topic(self, user_qq: str, topic: str) -> bool:
+        """
+        添加用户避免的话题
+        
+        Args:
+            user_qq: 用户QQ号
+            topic: 避免的话题
+            
+        Returns:
+            bool: 是否添加成功
+        """
+        user_qq = str(user_qq)
+        db = SessionLocal()
+        
+        try:
+            profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+            
+            if profile:
+                relationship_data = profile.relationship_data
+                if not relationship_data:
+                    relationship_data = {"target_id": user_qq, "avoid_topics": []}
+                
+                if "avoid_topics" not in relationship_data:
+                    relationship_data["avoid_topics"] = []
+                
+                if topic not in relationship_data["avoid_topics"]:
+                    relationship_data["avoid_topics"].append(topic)
+                    profile.relationship_data = relationship_data
+                    profile.updated_at = str(time.time())
+                    db.commit()
+                
+                return True
+            else:
+                # 用户不存在，创建新用户
+                relationship = Relationship(target_id=user_qq, avoid_topics=[topic])
+                new_profile = UserProfileModel(
+                    qq_id=user_qq,
+                    name=f"User_{user_qq}",
+                    relationship_data=relationship.model_dump()
+                )
+                
+                db.add(new_profile)
+                db.commit()
+                return True
+                
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"[RelationDB] 添加避免话题失败: {str(e)}")
+            return False
+        finally:
+            db.close()
+    
+    def update_interaction_pattern(self, user_qq: str, pattern_type: str, value: Any) -> bool:
+        """
+        更新用户的交互模式
+        
+        Args:
+            user_qq: 用户QQ号
+            pattern_type: 交互模式类型
+            value: 交互模式值
+            
+        Returns:
+            bool: 是否更新成功
+        """
+        user_qq = str(user_qq)
+        db = SessionLocal()
+        
+        try:
+            profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+            
+            if profile:
+                relationship_data = profile.relationship_data
+                if not relationship_data:
+                    relationship_data = {"target_id": user_qq, "interaction_patterns": {}}
+                
+                if "interaction_patterns" not in relationship_data:
+                    relationship_data["interaction_patterns"] = {}
+                
+                relationship_data["interaction_patterns"][pattern_type] = value
+                profile.relationship_data = relationship_data
+                profile.updated_at = str(time.time())
+                db.commit()
+                return True
+            else:
+                # 用户不存在，创建新用户
+                relationship = Relationship(target_id=user_qq, interaction_patterns={pattern_type: value})
+                new_profile = UserProfileModel(
+                    qq_id=user_qq,
+                    name=f"User_{user_qq}",
+                    relationship_data=relationship.model_dump()
+                )
+                
+                db.add(new_profile)
+                db.commit()
+                return True
+                
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"[RelationDB] 更新交互模式失败: {str(e)}")
+            return False
+        finally:
+            db.close()
+    
+    def add_sentiment_trend(self, user_qq: str, sentiment: str, intensity: float) -> bool:
+        """
+        添加用户的情感趋势
+        
+        Args:
+            user_qq: 用户QQ号
+            sentiment: 情感类型
+            intensity: 情感强度
+            
+        Returns:
+            bool: 是否添加成功
+        """
+        user_qq = str(user_qq)
+        db = SessionLocal()
+        
+        try:
+            profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+            
+            if profile:
+                relationship_data = profile.relationship_data
+                if not relationship_data:
+                    relationship_data = {"target_id": user_qq, "sentiment_trends": []}
+                
+                if "sentiment_trends" not in relationship_data:
+                    relationship_data["sentiment_trends"] = []
+                
+                # 添加情感趋势记录
+                sentiment_record = {
+                    "timestamp": str(time.time()),
+                    "sentiment": sentiment,
+                    "intensity": intensity
+                }
+                relationship_data["sentiment_trends"].append(sentiment_record)
+                
+                # 只保留最近100条情感记录
+                if len(relationship_data["sentiment_trends"]) > 100:
+                    relationship_data["sentiment_trends"] = relationship_data["sentiment_trends"][-100:]
+                
+                profile.relationship_data = relationship_data
+                profile.updated_at = str(time.time())
+                db.commit()
+                return True
+            else:
+                # 用户不存在，创建新用户
+                sentiment_record = {
+                    "timestamp": str(time.time()),
+                    "sentiment": sentiment,
+                    "intensity": intensity
+                }
+                relationship = Relationship(target_id=user_qq, sentiment_trends=[sentiment_record])
+                new_profile = UserProfileModel(
+                    qq_id=user_qq,
+                    name=f"User_{user_qq}",
+                    relationship_data=relationship.model_dump()
+                )
+                
+                db.add(new_profile)
+                db.commit()
+                return True
+                
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"[RelationDB] 添加情感趋势失败: {str(e)}")
+            return False
+        finally:
+            db.close()
 
     def _migrate_from_json(self):
         """从旧的JSON文件迁移数据到数据库"""
@@ -402,6 +740,403 @@ class GlobalRelationDB:
             db.rollback()
             logger.error(f"[RelationDB] 更新关系失败: {str(e)}")
             return False
+        finally:
+            db.close()
+
+    def add_memory_point(self, user_qq: str, category: str, content: str, weight: float = 1.0) -> bool:
+        """
+        添加记忆点到用户关系中
+        
+        Args:
+            user_qq: 用户QQ号
+            category: 记忆分类
+            content: 记忆内容
+            weight: 记忆权重
+            
+        Returns:
+            bool: 是否添加成功
+        """
+        user_qq = str(user_qq)
+        db = SessionLocal()
+        
+        try:
+            profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+            
+            if profile:
+                relationship_data = profile.relationship_data
+                if not relationship_data:
+                    relationship_data = {
+                        "target_id": user_qq,
+                        "intimacy": 60,
+                        "familiarity": 50,
+                        "trust": 50,
+                        "interest_match": 50,
+                        "memory_points": [],
+                        "expression_habits": []
+                    }
+                
+                # 确保memory_points存在
+                if "memory_points" not in relationship_data:
+                    relationship_data["memory_points"] = []
+                
+                # 创建记忆点
+                memory_point = f"{category}:{content}:{weight}"
+                relationship_data["memory_points"].append(memory_point)
+                
+                profile.relationship_data = relationship_data
+                profile.updated_at = str(time.time())
+                db.commit()
+                return True
+            else:
+                # 用户不存在，创建新用户
+                relationship_data = {
+                    "target_id": user_qq,
+                    "intimacy": 60,
+                    "familiarity": 50,
+                    "trust": 50,
+                    "interest_match": 50,
+                    "memory_points": [f"{category}:{content}:{weight}"],
+                    "expression_habits": []
+                }
+                
+                new_profile = UserProfileModel(
+                    qq_id=user_qq,
+                    name=f"User_{user_qq}",
+                    relationship_data=relationship_data
+                )
+                
+                db.add(new_profile)
+                db.commit()
+                return True
+                
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"[RelationDB] 添加记忆点失败: {str(e)}")
+            return False
+        finally:
+            db.close()
+
+    def add_expression_habit(self, user_qq: str, habit: str) -> bool:
+        """
+        添加表达习惯到用户关系中
+        
+        Args:
+            user_qq: 用户QQ号
+            habit: 表达习惯内容
+            
+        Returns:
+            bool: 是否添加成功
+        """
+        user_qq = str(user_qq)
+        db = SessionLocal()
+        
+        try:
+            profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+            
+            if profile:
+                relationship_data = profile.relationship_data
+                if not relationship_data:
+                    relationship_data = {
+                        "target_id": user_qq,
+                        "intimacy": 60,
+                        "familiarity": 50,
+                        "trust": 50,
+                        "interest_match": 50,
+                        "memory_points": [],
+                        "expression_habits": []
+                    }
+                
+                # 确保expression_habits存在
+                if "expression_habits" not in relationship_data:
+                    relationship_data["expression_habits"] = []
+                
+                # 添加表达习惯
+                relationship_data["expression_habits"].append(habit)
+                
+                profile.relationship_data = relationship_data
+                profile.updated_at = str(time.time())
+                db.commit()
+                return True
+            else:
+                # 用户不存在，创建新用户
+                relationship_data = {
+                    "target_id": user_qq,
+                    "intimacy": 60,
+                    "familiarity": 50,
+                    "trust": 50,
+                    "interest_match": 50,
+                    "memory_points": [],
+                    "expression_habits": [habit]
+                }
+                
+                new_profile = UserProfileModel(
+                    qq_id=user_qq,
+                    name=f"User_{user_qq}",
+                    relationship_data=relationship_data
+                )
+                
+                db.add(new_profile)
+                db.commit()
+                return True
+                
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"[RelationDB] 添加表达习惯失败: {str(e)}")
+            return False
+        finally:
+            db.close()
+
+    def get_memory_points_by_category(self, user_qq: str, category: str) -> List[str]:
+        """
+        获取用户指定分类的记忆点
+        
+        Args:
+            user_qq: 用户QQ号
+            category: 记忆分类
+            
+        Returns:
+            List[str]: 记忆点列表
+        """
+        user_qq = str(user_qq)
+        db = SessionLocal()
+        
+        try:
+            profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+            
+            if profile and profile.relationship_data:
+                memory_points = profile.relationship_data.get("memory_points", [])
+                return [mp for mp in memory_points if mp.startswith(f"{category}:")]
+            return []
+            
+        except SQLAlchemyError as e:
+            logger.error(f"[RelationDB] 获取记忆点失败: {str(e)}")
+            return []
+        finally:
+            db.close()
+
+    def get_random_memory_points(self, user_qq: str, category: str = None, num: int = 3) -> List[str]:
+        """
+        获取用户随机的记忆点
+        
+        Args:
+            user_qq: 用户QQ号
+            category: 记忆分类（可选）
+            num: 获取数量
+            
+        Returns:
+            List[str]: 随机记忆点列表
+        """
+        user_qq = str(user_qq)
+        db = SessionLocal()
+        
+        try:
+            profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+            
+            if profile and profile.relationship_data:
+                memory_points = profile.relationship_data.get("memory_points", [])
+                
+                if category:
+                    memory_points = [mp for mp in memory_points if mp.startswith(f"{category}:")]
+                
+                if not memory_points:
+                    return []
+                
+                # 随机选择记忆点
+                return random.sample(memory_points, min(num, len(memory_points)))
+            return []
+            
+        except SQLAlchemyError as e:
+            logger.error(f"[RelationDB] 获取随机记忆点失败: {str(e)}")
+            return []
+        finally:
+            db.close()
+    
+    def get_all_memory_categories(self, user_qq: str) -> List[str]:
+        """
+        获取用户所有记忆点分类
+        
+        Args:
+            user_qq: 用户QQ号
+            
+        Returns:
+            List[str]: 记忆分类列表
+        """
+        user_qq = str(user_qq)
+        db = SessionLocal()
+        
+        try:
+            profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+            
+            if profile and profile.relationship_data:
+                memory_points = profile.relationship_data.get("memory_points", [])
+                categories = set()
+                for mp in memory_points:
+                    parts = mp.split(":", 1)
+                    if len(parts) > 1:
+                        categories.add(parts[0].strip())
+                return list(categories)
+            return []
+            
+        except SQLAlchemyError as e:
+            logger.error(f"[RelationDB] 获取记忆分类失败: {str(e)}")
+            return []
+        finally:
+            db.close()
+    
+    def get_memory_content(self, memory_point: str) -> str:
+        """
+        从记忆点中提取记忆内容
+        
+        Args:
+            memory_point: 记忆点字符串，格式：category:content:weight
+            
+        Returns:
+            str: 记忆内容
+        """
+        if not isinstance(memory_point, str):
+            return ""
+        parts = memory_point.split(":")
+        return ":".join(parts[1:-1]).strip() if len(parts) > 2 else ""
+    
+    def get_memory_weight(self, memory_point: str) -> float:
+        """
+        从记忆点中提取记忆权重
+        
+        Args:
+            memory_point: 记忆点字符串，格式：category:content:weight
+            
+        Returns:
+            float: 记忆权重
+        """
+        if not isinstance(memory_point, str):
+            return 1.0
+        parts = memory_point.rsplit(":", 1)
+        if len(parts) <= 1:
+            return 1.0
+        try:
+            return float(parts[-1].strip())
+        except Exception:
+            return 1.0
+    
+    def add_group_nickname(self, user_qq: str, group_id: str, nickname: str) -> bool:
+        """
+        添加或更新用户在指定群的昵称
+        
+        Args:
+            user_qq: 用户QQ号
+            group_id: 群号
+            nickname: 群昵称
+            
+        Returns:
+            bool: 是否添加成功
+        """
+        user_qq = str(user_qq)
+        group_id = str(group_id)
+        db = SessionLocal()
+        
+        try:
+            profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+            
+            if profile:
+                relationship_data = profile.relationship_data
+                if not relationship_data:
+                    relationship_data = {
+                        "target_id": user_qq,
+                        "intimacy": 60,
+                        "familiarity": 50,
+                        "trust": 50,
+                        "interest_match": 50,
+                        "memory_points": [],
+                        "expression_habits": [],
+                        "group_nicknames": []
+                    }
+                
+                # 确保group_nicknames存在
+                if "group_nicknames" not in relationship_data:
+                    relationship_data["group_nicknames"] = []
+                
+                # 查找群昵称记录
+                group_nicknames = relationship_data["group_nicknames"]
+                updated = False
+                for item in group_nicknames:
+                    if item.get("group_id") == group_id:
+                        item["nickname"] = nickname
+                        updated = True
+                        break
+                
+                # 如果不存在则添加新记录
+                if not updated:
+                    group_nicknames.append({
+                        "group_id": group_id,
+                        "nickname": nickname,
+                        "updated_at": str(time.time())
+                    })
+                
+                profile.relationship_data = relationship_data
+                profile.updated_at = str(time.time())
+                db.commit()
+                return True
+            else:
+                # 用户不存在，创建新用户
+                relationship = Relationship(
+                    target_id=user_qq,
+                    intimacy=60,
+                    familiarity=50,
+                    trust=50,
+                    interest_match=50,
+                    memory_points=[],
+                    expression_habits=[],
+                    group_nicknames=[{
+                        "group_id": group_id,
+                        "nickname": nickname,
+                        "updated_at": str(time.time())
+                    }]
+                )
+                new_profile = UserProfileModel(
+                    qq_id=user_qq,
+                    name=f"User_{user_qq}",
+                    relationship_data=relationship.model_dump()
+                )
+                
+                db.add(new_profile)
+                db.commit()
+                return True
+                
+        except SQLAlchemyError as e:
+            logger.error(f"[RelationDB] 添加群昵称失败: {str(e)}")
+            return False
+        finally:
+            db.close()
+    
+    def get_group_nickname(self, user_qq: str, group_id: str) -> str:
+        """
+        获取用户在指定群的昵称
+        
+        Args:
+            user_qq: 用户QQ号
+            group_id: 群号
+            
+        Returns:
+            str: 群昵称，如果不存在则返回空字符串
+        """
+        user_qq = str(user_qq)
+        group_id = str(group_id)
+        db = SessionLocal()
+        
+        try:
+            profile = db.query(UserProfileModel).filter(UserProfileModel.qq_id == user_qq).first()
+            
+            if profile and profile.relationship_data:
+                relationship_data = profile.relationship_data
+                group_nicknames = relationship_data.get("group_nicknames", [])
+                for item in group_nicknames:
+                    if item.get("group_id") == group_id:
+                        return item.get("nickname", "")
+            return ""
+            
+        except SQLAlchemyError as e:
+            logger.error(f"[RelationDB] 获取群昵称失败: {str(e)}")
+            return ""
         finally:
             db.close()
 

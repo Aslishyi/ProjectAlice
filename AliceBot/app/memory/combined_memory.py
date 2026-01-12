@@ -9,6 +9,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 from app.core.config import config
 from app.memory.vector_store import vector_db
 from app.memory.relation_db import relation_db
+from app.memory.smart_retrieval import get_smart_memory_retriever
 
 # 配置日志
 logger = logging.getLogger("CombinedMemory")
@@ -129,6 +130,42 @@ class CombinedMemoryManager:
         
         # 知识图谱记忆可以通过重置kg实现
         self.kg_memory.kg = type(self.kg_memory.kg)()
+    
+    async def smart_retrieve(self, query: str, chat_history: str, sender: str, user_id: str) -> Dict[str, Any]:
+        """
+        智能记忆检索，根据查询和聊天历史自动生成检索问题并检索相关记忆
+        
+        Args:
+            query: 当前查询文本
+            chat_history: 聊天历史记录
+            sender: 发送者名称
+            user_id: 发送者用户ID
+            
+        Returns:
+            包含检索结果的字典
+        """
+        try:
+            # 获取智能记忆检索工具
+            retriever = get_smart_memory_retriever()
+            if not retriever:
+                logger.error("智能记忆检索工具不可用")
+                return {
+                    "has_relevant_memory": False,
+                    "memory_content": "",
+                    "questions": []
+                }
+            
+            # 执行智能记忆检索
+            result = await retriever.smart_retrieve_for_query(query, chat_history, sender, user_id)
+            return result
+            
+        except Exception as e:
+            logger.error(f"智能记忆检索失败: {e}")
+            return {
+                "has_relevant_memory": False,
+                "memory_content": "",
+                "questions": []
+            }
     
     async def forget_by_semantic(self, query: str, threshold: float = 0.4, user_id: Optional[str] = None) -> int:
         """

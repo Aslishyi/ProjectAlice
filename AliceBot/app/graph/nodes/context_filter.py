@@ -4,6 +4,7 @@ import json
 import re
 import time
 import logging
+import random
 from datetime import datetime
 
 # 配置日志
@@ -14,6 +15,9 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from app.core.state import AgentState
 from app.core.config import config
 from app.utils.cache import cached_llm_invoke
+
+# 导入表情包处理相关模块
+from app.plugins.emoji_plugin.emoji_service import get_emoji_service
 
 
 # ==============================================================================
@@ -82,12 +86,17 @@ Your task is to analyze the latest message and decide if Alice should reply.
 3.  **Sentence Fragmentation**: The user is sending a split sentence. Wait for the full thought.
 4.  **Double Sending**: Multiple messages in <1s. Only process the final one.
 5.  **Topic Exhaustion**: Alice gave a final answer, and the user's reply adds nothing new.
+6.  **Repetitive Content**: The user repeats the same message multiple times without new information.
 
 ### STEP 2: MODE-SPECIFIC RULES (If NO Blockers found)
 
 #### SCENARIO A: PRIVATE CHAT (1-on-1)
 **DEFAULT DECISION: TRUE (Reply)**.
 If the message is NOT blocked by Step 1, Alice should reply to maintain the conversation flow.
+
+**EXCEPTIONS:**
+- If the user is just sharing information without expecting a response (e.g., "I'm going to the store" with no question or invitation for reply)
+- If the message is clearly a draft or incomplete thought
 
 #### SCENARIO B: GROUP CHAT
 **DEFAULT DECISION: FALSE (Do NOT reply)**.
@@ -96,6 +105,8 @@ Alice should stay quiet to avoid spamming. **Return TRUE** ONLY if:
 2.  **Name Reference**: The message content explicitly mentions "Alice" (e.g., "Alice，你今天下午做了什么呀？").
 3.  **Explicit Question**: The user asks a clear question Alice is uniquely qualified to answer.
 4.  **Active Engagement**: The user is replying *directly* to Alice's previous statement.
+5.  **Group Dynamics**: The conversation is lulling and Alice can add meaningful contribution (rare, use sparingly)
+6.  **Important Announcement**: The user shares something important that Alice should acknowledge
 
 ### Output Format
 Return a JSON object with a "reasoning" field and a "should_reply" boolean.
@@ -185,18 +196,98 @@ async def context_filter_node(state: AgentState):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     is_group = state.get("is_group", False)
     is_mentioned = state.get("is_mentioned", False)
+    user_qq = state.get("sender_qq", "unknown")
+    user_name = state.get("sender_name", "User")
 
-    # 1. 强规则：无论群聊私聊，被艾特必须回 (最高优先级)
+    # 处理表情包标记（从qq_server.py传递）
+    is_emoji_only = False
+    last_content = ""
+    msgs = state.get("messages", [])
+    if msgs:
+        last_content = _extract_last_message_content(msgs)
+        # 检查是否为纯表情包消息
+        if "【表情包:" in last_content:
+            # 1. 移除用户名前缀 (格式: [用户名]: )
+            temp_text = re.sub(r"^\[.*?\]:\s*", "", last_content)
+            # 2. 移除图片占位符和表情包标记
+            clean_text = temp_text.replace("[图片]", "").replace("[表情]", "").replace(" ", "").strip()
+            # 3. 移除表情包标记（使用正则表达式）
+            clean_text = re.sub(r"【表情包:.*?】", "", clean_text)
+            # 4. 再次清理并判断是否为纯表情包消息
+            clean_text = clean_text.strip()
+            if len(clean_text) < 2:
+                is_emoji_only = True
+                logger.info(f"[{ts}]📝 [Filter] 检测到纯表情包消息")
+                logger.debug(f"[{ts}]📝 [Filter] 原始内容: {last_content}, 清理后: '{clean_text}'")
+
+    # 处理纯表情包消息：只存储不回复或概率回复
+    if is_emoji_only:
+        # 概率回复：50%的概率不回复，50%的概率回复
+        if random.random() < 0.5:
+            logger.info(f"[{ts}]🎲 [Filter] 纯表情包消息，不进行回复")
+            return {
+                "should_reply": False,
+                "filter_reason": "Emoji only message, skip reply",
+                "last_interaction_ts": current_ts
+            }
+        else:
+            logger.info(f"[{ts}]🎲 [Filter] 纯表情包消息，概率回复表情包")
+            try:
+                # 获取emoji服务
+                emoji_service = get_emoji_service()
+                
+                if emoji_service:
+                    # 从对话历史中提取上下文信息
+                    context = {
+                        "last_message": last_content,
+                        "message_history": msgs[-5:]  # 最近5条消息
+                    }
+                    
+                    # 使用emoji服务根据上下文选择合适的表情包
+                    selected_emojis = emoji_service.get_emoji_for_context(context, count=1)
+                    
+                    if selected_emojis:
+                        selected_emoji = selected_emojis[0]
+                        logger.info(f"[{ts}]🎭 [Filter] 根据语境选择了表情包: {selected_emoji.emoji_hash}")
+                        
+                        # 直接返回短路回复结果，不进行后续处理
+                        return {
+                            "should_reply": True,
+                            "filter_reason": "Emoji only message, reply with emoji",
+                            "last_interaction_ts": current_ts,
+                            "is_emoji_only": is_emoji_only,
+                            "short_circuit_emoji": selected_emoji.file_path
+                        }
+                    else:
+                        # 没有找到合适的表情包，使用默认表情符号
+                        raise Exception("No matching emojis found")
+            except Exception as e:
+                logger.error(f"[{ts}]❌ [Filter] 选择表情包失败: {e}")
+            
+            # 如果表情包选择失败，使用默认表情符号
+            default_emojis = ["🐶", "🐱", "💖", "💕", "💝", "🤗", "👻", "👽"]
+            selected_emoji = random.choice(default_emojis)
+            logger.info(f"[{ts}]😀 [Filter] 使用默认表情符号: {selected_emoji}")
+            return {
+                "should_reply": True,
+                "filter_reason": "Emoji only message, reply with default emoji",
+                "last_interaction_ts": current_ts,
+                "is_emoji_only": is_emoji_only,
+                "short_circuit_text": selected_emoji
+            }
+
+    # 3. 强规则：无论群聊私聊，被艾特必须回 (最高优先级)
     if is_mentioned:
         return {
             "should_reply": True,
             "filter_reason": "Directly mentioned (Hard Rule)",
-            "last_interaction_ts": current_ts
+            "last_interaction_ts": current_ts,
+            "is_emoji_only": is_emoji_only
         }
 
     msgs = state.get("messages", [])
     if not msgs:
-        return {"should_reply": False, "filter_reason": "No messages"}
+        return {"should_reply": False, "filter_reason": "No messages", "is_emoji_only": is_emoji_only}
 
     # 提取最后一条消息的内容
     last_content = _extract_last_message_content(msgs)
@@ -204,9 +295,12 @@ async def context_filter_node(state: AgentState):
     # 检查是否有图片
     has_img = _check_has_image(state, last_content)
     
+    # 表情包处理已由qq_server.py完成，这里不再重复处理
+    
     # 2. 应用启发式预过滤
     pre_filter_result = _apply_heuristic_pre_filter(state, last_content, has_img)
     if pre_filter_result:
+        pre_filter_result["is_emoji_only"] = is_emoji_only
         return pre_filter_result
 
     # 3. 构建上下文历史
@@ -249,12 +343,13 @@ async def context_filter_node(state: AgentState):
 
             log_icon = "✅" if should else "🛑"
             mode_icon = "👥" if is_group else "👤"
-            logger.info(f"[{ts}]{log_icon} [Filter] [{mode_icon}] Reply? {should} | Reason: {reason[:100]}")
+            logger.info(f"[{ts}]{log_icon} [Filter] [{mode_icon}] Reply? {should} | Reason: {reason[:200]}")
 
             return {
                 "should_reply": should,
                 "filter_reason": reason,
-                "last_interaction_ts": current_ts
+                "last_interaction_ts": current_ts,
+                "is_emoji_only": is_emoji_only
             }
         else:
             logger.warning(f"[{ts}]⚠️ [Filter Warning] JSON Parse Failed. Raw: {raw_content[:50]}...")
@@ -262,7 +357,8 @@ async def context_filter_node(state: AgentState):
             return {
                 "should_reply": not is_group,
                 "filter_reason": "Parse fail (Fallback)",
-                "last_interaction_ts": current_ts
+                "last_interaction_ts": current_ts,
+                "is_emoji_only": is_emoji_only
             }
 
     except Exception as e:
@@ -270,5 +366,6 @@ async def context_filter_node(state: AgentState):
         return {
             "should_reply": not is_group,
             "filter_reason": f"Error fallback: {str(e)}",
-            "last_interaction_ts": current_ts
+            "last_interaction_ts": current_ts,
+            "is_emoji_only": is_emoji_only
         }

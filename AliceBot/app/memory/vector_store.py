@@ -180,35 +180,65 @@ class VectorMemory(VectorStore):
         return scored_candidates[:k]
 
     def _calculate_time_decay(self, created_at_str: str, half_life_hours: float = 48.0) -> float:
-        """计算时间衰减因子"""
+        """
+        计算时间衰减因子，优化的衰减算法
+        """
         try:
             mem_time = datetime.strptime(created_at_str, "%Y-%m-%d %H:%M:%S")
             delta_hours = (datetime.now() - mem_time).total_seconds() / 3600.0
-            decay = max(0.3, math.pow(0.5, delta_hours / half_life_hours))
+            
+            # 优化的衰减算法：前24小时衰减较慢，之后加速衰减
+            if delta_hours < 24:
+                # 前24小时衰减较慢，half_life为96小时
+                decay = max(0.2, math.pow(0.5, delta_hours / 96.0))
+            else:
+                # 24小时后加速衰减，使用指定的half_life
+                decay = max(0.2, math.pow(0.5, delta_hours / half_life_hours))
+            
             return decay
         except:
             return 1.0
 
-    async def search(self, query: str, k: int = 3) -> List[str]:
-        """自定义搜索，考虑时间衰减和重要性，带缓存"""
+    async def search(self, query: str, k: int = 3, categories: List[str] = None, source_boosts: Dict[str, float] = None, importance_threshold: float = 0.5) -> List[str]:
+        """
+        自定义搜索，考虑时间衰减和重要性，带缓存，支持分类筛选和自定义来源权重
+        
+        Args:
+            query: 搜索查询
+            k: 返回结果数量
+            categories: 可选，指定要搜索的分类
+            source_boosts: 可选，自定义来源权重
+            importance_threshold: 可选，重要性阈值，过滤低于此阈值的记忆
+            
+        Returns:
+            List[str]: 搜索结果列表
+        """
         import asyncio
         from app.utils.cache import cached_context_get, cached_context_set
         
+        # 构建缓存键，考虑所有参数
+        cache_params = [f"{k}"]
+        if categories:
+            cache_params.extend(sorted(categories))
+        if source_boosts:
+            cache_params.extend([f"{k}:{v}" for k, v in sorted(source_boosts.items())])
+        cache_params.append(f"{importance_threshold}")
+        cache_key = f"vector_search:{hash(query)}:{':'.join(map(str, cache_params))}"
+        
         # 先检查上下文缓存
-        cache_key = f"vector_search:{hash(query)}:{k}"
         cached_results = await cached_context_get(cache_key)
         if cached_results:
             return cached_results
         
+        # 生成查询嵌入向量（在锁外进行，提高并发性能）
+        query_embedding = await self._generate_embeddings([query])
+        query_embedding = query_embedding[0] if query_embedding else []
+        
         with self._lock:
             try:
-                # 手动生成查询嵌入向量（使用异步方法）
-                query_embedding = await self._generate_embeddings([query])
-                query_embedding = query_embedding[0] if query_embedding else []
-                
                 results = self.collection.query(
                     query_embeddings=[query_embedding],
-                    n_results=k * 3,
+                    n_results=k * 5,  # 增加候选数量，提高选择质量
                     include=["documents", "metadatas", "distances"]
                 )
             except Exception as e:
@@ -223,24 +253,87 @@ class VectorMemory(VectorStore):
         dists = results["distances"][0]
 
         scored_candidates = []
+        seen_docs = set()  # 用于去重
+        
+        # 默认来源权重
+        default_source_boosts = {
+            "user_profile": 1.8,  # 提高用户资料的权重
+            "chat_history": 1.3,  # 提高聊天历史的权重
+            "interaction": 1.0,
+            "system": 0.9
+        }
+        
+        # 合并自定义来源权重
+        final_source_boosts = default_source_boosts.copy()
+        if source_boosts:
+            final_source_boosts.update(source_boosts)
 
         for doc, meta, dist in zip(docs, metas, dists):
+            # 去重
+            if doc in seen_docs:
+                continue
+            seen_docs.add(doc)
+            
+            # 分类筛选
+            if categories:
+                doc_category = meta.get("category", "")
+                if doc_category not in categories:
+                    continue
+            
+            # 重要性阈值过滤
+            importance = float(meta.get("importance", 1))
+            if importance < importance_threshold:
+                continue
+            
+            # 计算语义相似度得分（距离越小越相似）
             semantic_score = 1.0 / (1.0 + dist)
+            
+            # 计算时间衰减因子
             created_at = meta.get("created_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
             time_score = self._calculate_time_decay(created_at)
-            importance = float(meta.get("importance", 1))
-            imp_boost = 1.0 + (importance * 0.15)
-
-            final_score = semantic_score * time_score * imp_boost
+            
+            # 计算重要性权重
+            imp_boost = 1.0 + (importance * 0.3)  # 增加重要性的影响
+            
+            # 计算来源权重
+            source = meta.get("source", "interaction")
+            source_boost = final_source_boosts.get(source, 1.0)
+            
+            # 计算最终得分
+            final_score = semantic_score * time_score * imp_boost * source_boost
+            
+            # 如果文档包含关键词，给予额外奖励
+            if query.lower() in doc.lower():
+                final_score *= 1.1  # 关键词匹配奖励
+            
             scored_candidates.append((final_score, doc))
 
+        # 按得分排序，取前k个
         scored_candidates.sort(key=lambda x: x[0], reverse=True)
         top_docs = [item[1] for item in scored_candidates[:k]]
         
         # 将结果存入上下文缓存
-        await cached_context_set(cache_key, top_docs, ttl=1800)  # 缓存30分钟
+        await cached_context_set(cache_key, top_docs, ttl=3600)  # 增加缓存时间到1小时
 
         return top_docs
+        
+    async def search_by_category(self, category: str, query: str = None, k: int = 5) -> List[str]:
+        """
+        按分类搜索记忆
+        
+        Args:
+            category: 要搜索的分类
+            query: 可选，搜索查询
+            k: 返回结果数量
+            
+        Returns:
+            List[str]: 搜索结果列表
+        """
+        if not query:
+            # 如果没有查询词，直接使用分类名作为查询
+            query = category
+        
+        return await self.search(query, k=k, categories=[category])
 
     async def delete_by_semantic(self, query: str, threshold: float = 0.3):
         """通过语义删除相似项"""

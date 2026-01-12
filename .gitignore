@@ -85,3 +85,7 @@ Desktop.ini
 /NapCat.41785.Shell/
 /AliceBot/log/
 /MaiBot-main/
+/AliceBot/cache/
+/AliceBot/data/
+/AliceBot/emoji_data/
+/AliceBot/tests/

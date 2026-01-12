@@ -18,6 +18,9 @@ class AgentState(TypedDict):
     should_reply: bool
     filter_reason: str
     is_proactive_mode: bool
+    is_emoji_only: bool  # 是否为纯表情包消息
+    short_circuit_emoji: Optional[str]  # 短路回复表情包路径
+    short_circuit_text: Optional[str]  # 短路回复文本
 
     # --- 视觉优化 ---
     image_urls: List[str]
@@ -38,3 +41,4 @@ class AgentState(TypedDict):
     next_step: str
     user_profile: Dict
     tool_call: Dict[str, Any]
+    emoji_reply: Optional[str]  # 表情包回复路径

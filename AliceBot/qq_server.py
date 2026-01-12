@@ -42,6 +42,9 @@ from app.memory.relation_db import relation_db
 from app.memory.local_history import LocalHistoryManager
 from app.background.dream import dream_machine
 from app.utils.qq_utils import parse_onebot_array_msg
+from app.plugins.emoji_plugin.emoji_service import get_emoji_service
+from app.plugins.emoji_plugin.emoji_manager import get_emoji_manager  # 兼容旧代码
+from app.core.database import SessionLocal, ForwardMessageModel
 
 # 配置根日志记录器
 log_directory = os.path.join(os.path.dirname(__file__), "log")
@@ -123,21 +126,21 @@ class MessageBuffer:
         self.buffers = {}
         self.lock = asyncio.Lock()
         
-        # 批处理策略配置
+        # 批处理策略配置 - 优化后的配置，进一步减少等待时间
         self.strategies = {
             "group": {
-                "wait_time": 0.8,  # 群聊等待时间更短，提高响应速度
-                "max_batch_size": 15,  # 群聊可以合并更多消息
-                "max_wait_time": 2.5,  # 最长等待时间，防止消息延迟过高
-                "same_user_merge_window": 30,  # 同一用户消息合并窗口（秒）
-                "batch_merge_window": 2  # 批次合并窗口（秒）
+                "wait_time": 0.3,  # 群聊等待时间进一步缩短，提高响应速度
+                "max_batch_size": 8,  # 群聊合并消息数量减少，加快响应
+                "max_wait_time": 1.0,  # 最长等待时间进一步缩短
+                "same_user_merge_window": 20,  # 同一用户消息合并窗口缩短
+                "batch_merge_window": 0.8  # 批次合并窗口缩短
             },
             "private": {
-                "wait_time": 1.5,  # 私聊可以等待更长时间，提高合并效果
-                "max_batch_size": 8,  # 私聊合并较少消息，保持对话流畅
-                "max_wait_time": 5.0,  # 最长等待时间
-                "same_user_merge_window": 60,  # 同一用户消息合并窗口（秒）
-                "batch_merge_window": 3  # 批次合并窗口（秒）
+                "wait_time": 0.5,  # 私聊等待时间进一步缩短
+                "max_batch_size": 3,  # 私聊合并消息数量减少，保持对话流畅
+                "max_wait_time": 1.2,  # 最长等待时间缩短
+                "same_user_merge_window": 40,  # 同一用户消息合并窗口缩短
+                "batch_merge_window": 1.0  # 批次合并窗口缩短
             }
         }
 
@@ -398,6 +401,23 @@ class QQBotManager:
                         thought = node_val.get("internal_monologue")
                         if thought: logger.info(f"💭 [{node_name.upper()}] {thought}")
 
+                        # 处理 emoji_reply 字段（直接发送表情包）
+                        emoji_reply = node_val.get("emoji_reply")
+                        if emoji_reply:
+                            try:
+                                target = int(group_id) if msg_type == "group" else int(user_qq)
+                                # 使用file:///协议格式，确保OneBot客户端能正确识别本地文件路径
+                                img_cq = f'[CQ:image,file=file:///{emoji_reply}]'
+                                logger.info(f"📷 发送表情包回复: {emoji_reply}")
+                                await self.send_msg(self_id, msg_type, target, img_cq)
+                                
+                                # 更新最后活跃时间
+                                session_key = f"{msg_type}_{target}"
+                                await session_manager.update_activity(session_key, msg_type, str(target), self_id)
+                                continue
+                            except Exception as e:
+                                logger.error(f"❌ 处理表情包回复失败: {e}")
+
                         msgs = node_val.get("messages", [])
                         if msgs and isinstance(msgs[-1], AIMessage):
                             original_reply = msgs[-1].content
@@ -422,8 +442,43 @@ class QQBotManager:
                                     final_send_content = f"[CQ:at,qq={user_qq}] {original_reply}"
 
                             try:
+                                # 处理回复中的表情包标记
+                                final_content = final_send_content
+                                
+                                # 查找所有表情包标记 [表情: 哈希值]
+                                import re
+                                emoji_pattern = r'\[表情: (\w+)\]'
+                                emoji_matches = re.findall(emoji_pattern, final_content)
+                                
                                 target = int(group_id) if msg_type == "group" else int(user_qq)
-                                await self.send_msg(self_id, msg_type, target, final_send_content)
+                                
+                                if emoji_matches:
+                                    emoji_manager = get_emoji_manager()
+                                    if emoji_manager:
+                                        # 分离文字内容和表情包
+                                        text_content = re.sub(emoji_pattern, '', final_content).strip()
+                                        
+                                        # 先发送文字消息（如果有）
+                                        if text_content:
+                                            await self.send_msg(self_id, msg_type, target, text_content)
+                                        
+                                        # 然后分开发送每个表情包
+                                        for emoji_hash in emoji_matches:
+                                            try:
+                                                emoji_info = emoji_manager.get_emoji(emoji_hash)
+                                                if emoji_info and emoji_info.file_path:
+                                                    # 使用本地文件路径生成CQ码，避免base64数据过长
+                                                    img_path = emoji_info.file_path
+                                                    # 使用file:///协议格式，确保OneBot客户端能正确识别本地文件路径
+                                                    img_cq = f'[CQ:image,file=file:///{img_path}]'
+                                                    logger.info(f"📷 发送表情包: {emoji_hash} -> 文件路径: {img_path}")
+                                                    await self.send_msg(self_id, msg_type, target, img_cq)
+                                            except Exception as e:
+                                                logger.error(f"❌ 处理表情包失败: {e}")
+                                else:
+                                    # 如果没有表情包，直接发送文字消息
+                                    if final_content.strip():
+                                        await self.send_msg(self_id, msg_type, target, final_content)
 
                                 # 更新最后活跃时间，防止 Proactive 刚说完又触发 Proactive
                                 session_key = f"{msg_type}_{target}"
@@ -453,46 +508,96 @@ class QQBotManager:
             target_id = group_id if msg_type == "group" else user_qq
             await session_manager.update_activity(session_id, msg_type, target_id, self_id)
 
+            # 记录原始消息数据，用于调试合并转发消息
+            # 记录完整的原始消息结构
+            logger.info(f"📦 [Raw Msg Full] {user_nickname}: {raw_messages}")
+            # 记录消息类型和message字段
+            for i, msg in enumerate(raw_messages):
+                logger.info(f"📦 [Raw Msg {i}] Type: {msg.get('type')}, Message: {msg.get('message')}")
+            
             # 解析消息批次
-            full_text, image_urls, is_mentioned = await self._parse_message_batch(raw_messages, self_id)
+            full_text, image_urls, is_mentioned = await self._parse_message_batch(raw_messages, self_id, user_qq, user_nickname)
 
             logger.info(f"📦 [Msg] {user_nickname}: {full_text[:50]}... [URLs: {len(image_urls)}]")
+            
+            # 不再需要自动保存，因为已经在_parse_message_batch中处理
 
-            # 构建输入参数
-            inputs = await self._build_reactive_inputs(
-                session_id=session_id,
-                full_text=full_text,
-                image_urls=image_urls,
-                user_qq=user_qq,
-                user_nickname=user_nickname,
-                msg_type=msg_type,
-                is_mentioned=is_mentioned
-            )
+        # 构建输入参数
+        inputs = await self._build_reactive_inputs(
+            session_id=session_id,
+            full_text=full_text,
+            image_urls=image_urls,
+            user_qq=user_qq,
+            user_nickname=user_nickname,
+            msg_type=msg_type,
+            is_mentioned=is_mentioned
+        )
 
-            await self.handle_graph_output(inputs, self_id, msg_type, group_id, user_qq)
+        await self.handle_graph_output(inputs, self_id, msg_type, group_id, user_qq)
 
-    async def _parse_message_batch(self, raw_messages: list, self_id: str):
+    async def _parse_message_batch(self, raw_messages: list, self_id: str, user_qq: str, user_nickname: str):
         """解析消息批次，提取文本、图片URL和是否被提及"""
         full_text = ""
         image_urls = []
+        emoji_descriptions = []
         is_mentioned = False
         processed_reply_ids = set()
 
+        # 收集所有需要处理的引用消息ID
+        reply_ids_to_process = []
+        # 处理转发消息ID列表
+        forward_ids_to_process = []
+        
         for item in raw_messages:
             # 解析单条消息
             t, imgs, reply_id = parse_onebot_array_msg(item.get("message", ""))
+            
+            # 检查是否包含转发消息
+            if "[合并转发消息(ID:" in t:
+                # 提取转发ID
+                import re
+                match = re.search(r'\[合并转发消息\(ID:(\d+)\)\]', t)
+                if match:
+                    forward_id = match.group(1)
+                    forward_ids_to_process.append(forward_id)
+            
             full_text += t + " "
-            image_urls.extend(imgs)
+            
+            # 检查图片是否为表情包
+            import io
+            import base64
+            from PIL import Image
+            
+            for img_url in imgs:
+                try:
+                    # 下载图片并判断是否为表情包
+                    emoji_service = get_emoji_service()
+                    if emoji_service:
+                        # 使用emoji_service处理图片
+                        result = await emoji_service.process_emoji(img_url, user_qq, user_nickname)
+                        
+                        if result.get("success", False):
+                            # 将表情包情绪标签添加到文本中，而不是详细描述
+                            emotions = result.get("emotions", ["未知"])
+                            emoji_desc = "、".join(emotions)
+                            full_text += f"【表情包: {emoji_desc}】\n"
+                            emoji_descriptions.append(emoji_desc)
+                        else:
+                            # 如果不是表情包或处理失败，正常添加到图片列表
+                            image_urls.append(img_url)
+                    else:
+                        # 如果EmojiService不可用，将图片添加到普通图片列表
+                        logger.warning(f"⚠️ EmojiService不可用，将图片{img_url[:30]}...视为普通图片处理")
+                        image_urls.append(img_url)
+                except Exception as e:
+                    logger.error(f"❌ 处理图片时发生错误: {e}")
+                    # 发生错误时，仍将图片添加到列表
+                    image_urls.append(img_url)
 
-            # 处理引用消息
+            # 收集引用消息ID
             if reply_id and reply_id not in processed_reply_ids:
                 processed_reply_ids.add(reply_id)
-                msg_data = await self.call_api(self_id, "get_msg", {"message_id": reply_id})
-                if msg_data and "data" in msg_data:
-                    ref_msg = msg_data["data"].get("message", "")
-                    ref_text, ref_imgs, _ = parse_onebot_array_msg(ref_msg)
-                    full_text += f"【引用: {ref_text}】\n"
-                    image_urls.extend(ref_imgs)
+                reply_ids_to_process.append(reply_id)
 
             # 检查是否被@
             raw_arr = item.get("message", [])
@@ -500,10 +605,191 @@ class QQBotManager:
                 for seg in raw_arr:
                     if seg.get("type") == "at" and str(seg.get("data", {}).get("qq", "")) == self_id:
                         is_mentioned = True
+            
+            # 检查是否包含forward类型的消息段，提取转发ID
+            if isinstance(raw_arr, list):
+                for seg in raw_arr:
+                    if seg.get("type") == "forward":
+                        forward_data = seg.get("data", {})
+                        forward_id = forward_data.get("id") or forward_data.get("forward_id")
+                        if forward_id:
+                            forward_ids_to_process.append(str(forward_id))
+
+        # 并行处理所有引用消息（性能优化）
+        if reply_ids_to_process:
+            # 创建所有API调用任务
+            api_tasks = [self.call_api(self_id, "get_msg", {"message_id": rid}) for rid in reply_ids_to_process]
+            # 并行执行所有API调用
+            msg_data_list = await asyncio.gather(*api_tasks, return_exceptions=True)
+            
+            # 处理API调用结果
+            for i, msg_data in enumerate(msg_data_list):
+                if isinstance(msg_data, Exception):
+                    logger.error(f"获取引用消息失败: {msg_data}")
+                    continue
+                
+                if msg_data and "data" in msg_data:
+                    ref_msg = msg_data["data"].get("message", "")
+                    ref_text, ref_imgs, _ = parse_onebot_array_msg(ref_msg)
+                    full_text += f"【引用: {ref_text}】\n"
+                    
+                    # 处理引用消息中的图片
+                    for ref_img_url in ref_imgs:
+                        image_urls.append(ref_img_url)
+
+        # 循环处理所有转发消息（包括嵌套转发）
+        processed_forward_ids = set()
+        while forward_ids_to_process:
+            # 去重转发ID，排除已处理的
+            unique_forward_ids = [fid for fid in list(set(forward_ids_to_process)) if fid not in processed_forward_ids]
+            if not unique_forward_ids:
+                break
+                
+            logger.info(f"📦 [Forward] 处理{len(unique_forward_ids)}个转发消息ID: {unique_forward_ids}")
+            
+            # 创建所有API调用任务
+            api_tasks = [self.call_api(self_id, "get_forward_msg", {"id": fid}) for fid in unique_forward_ids]
+            # 并行执行所有API调用
+            forward_data_list = await asyncio.gather(*api_tasks, return_exceptions=True)
+            
+            # 处理API调用结果
+            for i, forward_data in enumerate(forward_data_list):
+                forward_id = unique_forward_ids[i]
+                processed_forward_ids.add(forward_id)
+                
+                if isinstance(forward_data, Exception):
+                    logger.error(f"获取转发消息{forward_id}失败: {forward_data}")
+                    continue
+                
+                if forward_data and "data" in forward_data:
+                    # 解析转发消息内容
+                    forward_msg_data = forward_data["data"]
+                    
+                    # 确保forward_msg_data是有效的字典
+                    if not isinstance(forward_msg_data, dict):
+                        logger.error(f"转发消息{forward_id}数据格式无效: {type(forward_msg_data)}")
+                        continue
+                    
+                    # 保存完整的转发消息到数据库
+                    try:
+                        with SessionLocal() as db:
+                            # 计算转发消息摘要
+                            messages = forward_msg_data.get("messages", [])
+                            msg_count = len(messages)
+                            image_count = 0
+                            summary_text = ""
+                            
+                            # 生成摘要
+                            for i, msg_item in enumerate(messages[:3]):
+                                sender_name = msg_item.get("sender", {}).get("nickname", msg_item.get("sender", {}).get("name", "未知用户"))
+                                msg_content = msg_item.get("message", "")
+                                msg_text, msg_imgs, _ = parse_onebot_array_msg(msg_content)
+                                
+                                if msg_text:
+                                    if len(msg_text) > 30:
+                                        msg_text = msg_text[:30] + "..."
+                                    summary_text += f"{sender_name}: {msg_text}\n"
+                                
+                                if msg_imgs:
+                                    image_count += len(msg_imgs)
+                            
+                            if msg_count > 3:
+                                summary_text += f"... 共{msg_count}条消息，{image_count}张图片 ..."
+                            
+                            # 检查是否已存在
+                            existing_forward = db.query(ForwardMessageModel).filter(ForwardMessageModel.forward_id == forward_id).first()
+                            
+                            if existing_forward:
+                                # 更新现有记录
+                                existing_forward.full_content = forward_msg_data
+                                existing_forward.summary = summary_text
+                                existing_forward.message_count = msg_count
+                                existing_forward.image_count = image_count
+                                db.commit()
+                                logger.info(f"📦 [DB Update] Forward message {forward_id} updated in database")
+                            else:
+                                # 创建新记录
+                                new_forward = ForwardMessageModel(
+                                    forward_id=forward_id,
+                                    full_content=forward_msg_data,
+                                    summary=summary_text,
+                                    message_count=msg_count,
+                                    image_count=image_count
+                                )
+                                db.add(new_forward)
+                                db.commit()
+                                logger.info(f"📦 [DB Save] Forward message {forward_id} saved to database")
+                    except Exception as e:
+                        logger.error(f"❌ [DB Error] Failed to save forward message: {e}")
+                    
+                    # 添加转发消息的整体标题
+                    full_text += f"\n【合并转发消息(ID:{forward_id})内容】\n"
+                    
+                    # 解析转发的每条消息
+                    if "messages" in forward_msg_data:
+                        messages = forward_msg_data["messages"]
+                        total_images = 0
+                        msg_count = len(messages)
+                        
+                        # 转发消息优化配置
+                        MAX_FORWARD_MSG_DISPLAY = 10  # 最大显示消息数
+                        TRUNCATE_MSG_LENGTH = 50     # 单条消息截断长度
+                        
+                        # 转发消息优化：只保留关键信息，减少Token消耗
+                        # 对于超过MAX_FORWARD_MSG_DISPLAY条的转发消息，只保留前3条和后3条
+                        display_messages = messages
+                        if msg_count > MAX_FORWARD_MSG_DISPLAY:
+                            display_messages = messages[:3] + messages[-3:]
+                            
+                        for i, msg_item in enumerate(display_messages):
+                            sender_name = msg_item.get("sender", {}).get("nickname", msg_item.get("sender", {}).get("name", "未知用户"))
+                            msg_content = msg_item.get("message", "")
+                            
+                            # 解析单条消息
+                            msg_text, msg_imgs, _ = parse_onebot_array_msg(msg_content)
+                            
+                            # 限制单条消息文本长度
+                            if msg_text:
+                                if len(msg_text) > TRUNCATE_MSG_LENGTH:
+                                    msg_text = msg_text[:TRUNCATE_MSG_LENGTH] + "..."
+                                full_text += f"【{sender_name}】: {msg_text}\n"
+                            
+                            if msg_imgs:
+                                # 保存转发消息中的图片URL
+                                for img_url in msg_imgs:
+                                    image_urls.append(img_url)
+                                total_images += len(msg_imgs)
+                                full_text += f" [{len(msg_imgs)}张图片]\n"
+                        
+                        # 如果是长消息，添加省略提示
+                        if msg_count > 10:
+                            omitted_count = msg_count - 6
+                            full_text += f"... 省略了{omitted_count}条消息 ...\n"
+                        
+                        # 检查嵌套转发消息（需要检查所有消息，而不仅是显示的）
+                        for msg_item in messages:
+                            msg_content = msg_item.get("message", "")
+                            if isinstance(msg_content, list):
+                                for seg in msg_content:
+                                    if isinstance(seg, dict) and seg.get("type") == "forward":
+                                        nested_forward_id = seg.get("data", {}).get("id") or seg.get("data", {}).get("forward_id")
+                                        if nested_forward_id and nested_forward_id not in processed_forward_ids:
+                                            # 将嵌套转发ID添加到待处理列表
+                                            forward_ids_to_process.append(str(nested_forward_id))
+                                            logger.info(f"📦 [Nested Forward] 发现嵌套转发消息，ID: {nested_forward_id}")
+                        
+                        # 添加总图片数量信息
+                        if total_images > 0:
+                            logger.info(f"📦 [Forward] 转发消息{forward_id}中包含{total_images}张图片")
+                    
+                    logger.info(f"📦 [Forward] 成功解析转发消息{forward_id}，包含{len(forward_msg_data.get('messages', []))}条消息")
+        
+        # 移除已处理的转发ID
+        forward_ids_to_process = [fid for fid in forward_ids_to_process if fid not in processed_forward_ids]
 
         # 清理文本
         full_text = full_text.strip()
-        if not full_text and image_urls:
+        if not full_text and image_urls and not emoji_descriptions:
             full_text = "[图片]"
 
         return full_text, image_urls, is_mentioned
@@ -686,6 +972,16 @@ is_main_process = os.environ.get('UVICORN_WORKER_ID') is None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import os
+    from app.plugins.plugin_manager import plugin_manager
+    
+    # 加载和初始化插件系统
+    plugin_dir = os.path.join(os.path.dirname(__file__), "app", "plugins")
+    loaded_count = plugin_manager.load_plugins_from_directory(plugin_dir)
+    if loaded_count > 0:
+        initialized_count = await plugin_manager.initialize_plugins()
+        logger.info(f"✅ Plugins Initialized: {initialized_count}/{loaded_count}")
+    else:
+        logger.info("No plugins loaded")
     
     # 启动DreamCycle
     # DreamCycle内部有文件锁机制，确保只有一个进程能成功启动
@@ -699,6 +995,10 @@ async def lifespan(app: FastAPI):
 
     # 停止
     proactive_task.cancel()
+    
+    # 关闭插件系统
+    shutdown_count = await plugin_manager.shutdown_plugins()
+    logger.info(f"✅ Plugins Shutdown: {shutdown_count}")
     
     if is_main_process:
         await dream_machine.stop()

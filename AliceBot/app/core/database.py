@@ -39,7 +39,7 @@ def get_db() -> Generator[Session, None, None]:
 
 
 # 导入数据库模型
-from sqlalchemy import Column, String, Text, DateTime, func
+from sqlalchemy import Column, String, Text, DateTime, func, JSON, Integer
 
 # 会话历史模型
 class SessionHistoryModel(Base):
@@ -49,6 +49,19 @@ class SessionHistoryModel(Base):
     summary = Column(Text, nullable=False, default="")
     messages = Column(Text, nullable=False, default="[]")  # JSON格式存储
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+# 转发消息存储模型
+class ForwardMessageModel(Base):
+    __tablename__ = "forward_messages"
+    
+    forward_id = Column(String(100), primary_key=True, index=True)  # 转发消息ID
+    full_content = Column(JSON, nullable=False)  # 完整的转发消息内容（JSON格式）
+    summary = Column(Text, nullable=False, default="")  # 转发消息摘要
+    message_count = Column(Integer, nullable=False, default=0)  # 消息数量
+    image_count = Column(Integer, nullable=False, default=0)  # 图片数量
+    created_at = Column(DateTime(timezone=True), server_default=func.now())  # 创建时间
+    accessed_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())  # 最后访问时间
 
 
 # 初始化数据库
