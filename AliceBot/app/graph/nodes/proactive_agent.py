@@ -10,7 +10,7 @@ from app.core.state import AgentState
 from app.core.config import config
 from app.core.global_store import global_store
 from app.memory.relation_db import relation_db
-from app.core.prompts import ALICE_CORE_PERSONA
+from app.core.prompts import ALICE_CORE_PERSONA, SOCIAL_VOLITION_PROMPT
 from app.utils.cache import cached_llm_invoke
 from app.memory.vector_store import vector_db as vector_store
 
@@ -235,7 +235,7 @@ def _ensure_alice_persona(content: str, intimacy: int) -> str:
     
     return _filter_unnatural_responses(result)
 
-async def _generate_proactive_content(user_id: str, topics: List[str], intimacy: int) -> str:
+async def _generate_proactive_content(user_id: str, topics: List[str], intimacy: int, current_time: str, silence_duration: str, stamina: float, chat_type: str, user_name: str, familiarity: int, trust: int, interest_match: int) -> str:
     """生成符合人设的主动交互内容"""
     if not topics:
         return ""
@@ -244,27 +244,26 @@ async def _generate_proactive_content(user_id: str, topics: List[str], intimacy:
         # 随机选择一个话题
         selected_topic = random.choice(topics)
         
-        # 构建生成prompt
-        prompt = f"""
-        你是18岁女大学生Alice，性格云淡风轻，喜欢安静的咖啡馆和旧书店。
-        现在你想主动和朋友聊聊天，基于以下话题点，用你平时的语气随便说点什么：
-        话题点：{selected_topic}
-        
-        要求：
-        1. 句子要短，10-20字左右
-        2. 语气自然，不要太刻意
-        3. 符合Alice云淡风轻的性格
-        4. 不要用感叹号，多用省略号
-        5. 不要太正式，就像平时说话一样
-        6. 不要问太多问题，随便聊聊就行
-        
-        例子：
-        话题：最近有没有读到什么有意思的书？
-        Alice：最近在看一本老书... 挺有意思的呢
-        
-        话题：附近新开了家咖啡馆
-        Alice：楼下新开的咖啡馆... 环境还不错
-        """
+        # 填充SOCIAL_VOLITION_PROMPT所需的参数
+        prompt = SOCIAL_VOLITION_PROMPT.format(
+            alice_core_persona=ALICE_CORE_PERSONA,
+            current_time=current_time,
+            time_period="上午" if 9 <= int(current_time.split(":")[0]) < 12 else "下午" if 12 <= int(current_time.split(":")[0]) < 18 else "晚上",
+            silence_duration=silence_duration,
+            mood="平静",  # 可以根据实际情况调整
+            stamina=stamina,
+            chat_type=chat_type,
+            user_name=user_name,
+            intimacy=intimacy,
+            familiarity=familiarity,
+            trust=trust,
+            interest_match=interest_match,
+            relation_tags="",  # 可以从数据库获取实际标签
+            relation_notes="",  # 可以从数据库获取实际备注
+            vision_desc="无",  # 主动发起时通常没有图片
+            personalized_info=f"感兴趣的话题: {selected_topic}",
+            conversation_summary=f"最近的话题: {selected_topic}"
+        )
         
         response = await cached_llm_invoke(
             llm, 
@@ -276,8 +275,17 @@ async def _generate_proactive_content(user_id: str, topics: List[str], intimacy:
         
         content = response.content.strip()
         if content:
-            # 确保内容符合Alice人设
-            return _ensure_alice_persona(content, intimacy)
+            try:
+                # 解析JSON响应
+                import json
+                result = json.loads(content)
+                proactive_content = result.get("content", "")
+                if proactive_content:
+                    # 确保内容符合Alice人设
+                    return _ensure_alice_persona(proactive_content, intimacy)
+            except json.JSONDecodeError:
+                # 如果不是JSON格式，直接使用内容
+                return _ensure_alice_persona(content, intimacy)
         
         return ""
     except Exception as e:
@@ -330,7 +338,20 @@ async def proactive_node(state: AgentState):
         topics = await interaction_manager.get_personalized_topics(user_id)
         
         # 8. 生成主动内容
-        content = await _generate_proactive_content(user_id, topics, intimacy)
+        # 准备SOCIAL_VOLITION_PROMPT所需的参数
+        current_time = datetime.now().strftime("%H:%M")
+        silence_duration = f"{silence_hours:.1f}小时"
+        stamina = getattr(rel, "stamina", 80.0)  # 使用默认值80.0如果没有
+        chat_type = "group" if is_group else "private"
+        user_name = user_display_name
+        familiarity = rel.familiarity
+        trust = rel.trust
+        interest_match = rel.interest_match
+        
+        content = await _generate_proactive_content(
+            user_id, topics, intimacy, current_time, silence_duration, stamina, 
+            chat_type, user_name, familiarity, trust, interest_match
+        )
         
         if not content or len(content.strip()) < 5:
             logger.debug(f"[{ts}] 生成的内容不符合要求，跳过主动交互")

@@ -159,8 +159,8 @@ class EmojiService:
             # 使用大模型分析表情包
             llm_result = await self.analyze_emoji(base64_data)
             
-            # 从LLM结果中提取信息，限制最多3个情绪标签
-            emotions = llm_result.get("emotions", ["未知"])[:3]
+            # 从LLM结果中提取信息，限制最多1个情绪标签
+            emotions = llm_result.get("emotions", ["未知"])[:1]
             description = llm_result.get("description", f"用户{user_nickname}发送的表情包")
             category = llm_result.get("category", "其他")
             

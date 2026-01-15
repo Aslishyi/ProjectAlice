@@ -36,11 +36,18 @@ class PluginManager:
         for item in os.listdir(directory):
             item_path = os.path.join(directory, item)
             
+            # 跳过 __pycache__ 目录
+            if item == "__pycache__":
+                continue
+                
             if os.path.isdir(item_path):
                 # 尝试加载插件目录
                 if self._load_plugin_directory(item_path):
                     loaded_count += 1
             elif os.path.isfile(item_path) and item.endswith(".py") and not item.startswith("_"):
+                # 跳过 plugin_manager.py 和 base_plugin.py
+                if item == "plugin_manager.py" or item == "base_plugin.py":
+                    continue
                 # 尝试加载单个插件文件
                 if self._load_plugin_file(item_path):
                     loaded_count += 1

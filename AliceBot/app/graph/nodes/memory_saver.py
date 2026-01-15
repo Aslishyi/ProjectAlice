@@ -112,6 +112,9 @@ async def memory_saver_node(state: AgentState):
         operations = data.get("operations", [])
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        logger.info(f"[{ts}] 🧠 [Memory Debug] Extracted {len(operations)} operations from conversation")
+        logger.info(f"[{ts}] 🧠 [Memory Debug] Operations: {operations}")
+
         facts_to_add = []
         metadatas_to_add = []
 
@@ -123,7 +126,7 @@ async def memory_saver_node(state: AgentState):
 
             # 增强的重要性判断逻辑
             # 1. 检查是否包含明确的指令性词汇
-            instruction_keywords = ["需要记住", "请记住", "重要", "关键", "一定要", "务必", "牢记"]
+            instruction_keywords = ["要记住", "记住", "重要", "关键", "一定要", "务必", "牢记"]
             has_instruction = any(keyword in content for keyword in instruction_keywords)
             has_instruction_in_input = any(keyword in user_text for keyword in instruction_keywords)
             

@@ -95,14 +95,14 @@ class MemoryRetrievalTool:
 
 分析：
 - 当前信息是否足够回答问题？
-- **如果信息足够且能找到明确答案**，在思考中直接给出答案，格式为：found_answer(answer="你的答案内容")
-- **如果信息不足或无法找到答案**，在思考中给出：not_enough_info(reason="信息不足或无法找到答案的原因")
+- **如果信息足够且能找到相关内容**，在思考中直接给出答案，格式为：found_answer(answer="你的答案内容")
+- **如果完全找不到相关信息**，在思考中给出：not_enough_info(reason="信息不足或无法找到答案的原因")
 
 **重要规则：**
 - 必须严格使用检索到的信息回答问题，不要编造信息
 - 答案必须精简，不要过多解释
-- **只有在检索到明确、具体的答案时，才使用found_answer**
-- **如果信息不足、无法确定、找不到相关信息，必须使用not_enough_info，不要使用found_answer**
+- **如果检索到与问题相关的内容，即使不是完全精确的答案，也可以使用found_answer**
+- **只有在完全找不到任何相关信息时，才使用not_enough_info**
 - 答案必须给出，格式为 found_answer(answer="...") 或 not_enough_info(reason="...")。
 """
     
@@ -244,7 +244,10 @@ class MemoryRetrievalTool:
         # 步骤1: 生成记忆检索问题
         questions = await self.generate_memory_questions(chat_history, sender, query)
         
+        logger.debug(f"[Smart Retrieval] 生成的检索问题: {questions}")
+        
         if not questions:
+            logger.debug(f"[Smart Retrieval] 未生成检索问题，回退到传统检索")
             return {
                 "has_relevant_memory": False,
                 "memory_content": "",
@@ -254,17 +257,23 @@ class MemoryRetrievalTool:
         # 步骤2: 检索记忆
         retrieved_info = []
         for question in questions:
+            logger.debug(f"[Smart Retrieval] 执行检索问题: {question}")
             found, content = await self.retrieve_memory(question, chat_history)
+            logger.debug(f"[Smart Retrieval] 检索结果: found={found}, content={content}")
             if found:
                 retrieved_info.append(content)
         
+        logger.debug(f"[Smart Retrieval] 最终检索到的信息: {retrieved_info}")
+        
         if retrieved_info:
+            logger.debug(f"[Smart Retrieval] 找到相关记忆")
             return {
                 "has_relevant_memory": True,
                 "memory_content": "\n".join(retrieved_info),
                 "questions": questions
             }
         else:
+            logger.debug(f"[Smart Retrieval] 未找到相关记忆，回退到传统检索")
             return {
                 "has_relevant_memory": False,
                 "memory_content": "",
@@ -279,7 +288,12 @@ def get_smart_memory_retriever() -> Optional[MemoryRetrievalTool]:
     """获取全局智能记忆检索工具实例"""
     global smart_memory_retriever
     if smart_memory_retriever is None:
-        smart_memory_retriever = MemoryRetrievalTool()
+        try:
+            smart_memory_retriever = MemoryRetrievalTool()
+            logger.info("✅ 智能记忆检索工具初始化成功")
+        except Exception as e:
+            logger.error(f"❌ 智能记忆检索工具初始化失败: {e}")
+            smart_memory_retriever = None
     return smart_memory_retriever
 
 

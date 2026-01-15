@@ -25,8 +25,9 @@ class VectorMemory(VectorStore):
         self.client = chromadb.PersistentClient(path=config.VECTOR_DB_PATH)
         self._lock = threading.Lock()  # 初始化互斥锁
 
-        # 2. 初始化 OpenAI 客户端
-        self.openai_client = OpenAI(
+        # 2. 初始化异步 OpenAI 客户端
+        from openai import AsyncOpenAI
+        self.openai_client = AsyncOpenAI(
             api_key=config.SILICONFLOW_API_KEY,
             base_url=config.SILICONFLOW_BASE_URL
         )
@@ -37,6 +38,20 @@ class VectorMemory(VectorStore):
         self.collection = self.client.get_or_create_collection(
             name=config.COLLECTION_NAME
         )
+        
+        # 4. 标记清理任务未启动
+        self._cleanup_task_started = False
+    
+    def start_cleanup_task(self):
+        """手动启动定时清理任务
+        
+        只有当有运行的事件循环时才能调用此方法
+        """
+        if not self._cleanup_task_started:
+            import asyncio
+            asyncio.create_task(self._start_cleanup_task())
+            self._cleanup_task_started = True
+            logger.info("[VectorStore] 定时清理任务已启动")
 
     async def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """手动生成嵌入向量，带缓存"""
@@ -59,7 +74,7 @@ class VectorMemory(VectorStore):
         
         # 如果有未缓存的文本，调用API获取嵌入向量
         if uncached_texts:
-            response = self.openai_client.embeddings.create(
+            response = await self.openai_client.embeddings.create(
                 input=uncached_texts,
                 model=self.embedding_model
             )
@@ -502,6 +517,79 @@ class VectorMemory(VectorStore):
         instance = cls()
         await instance.add_texts(texts, metadatas)
         return instance
+    
+    async def _start_cleanup_task(self):
+        """启动定时清理任务"""
+        import time
+        import asyncio
+        from app.core.config import config
+        
+        # 获取清理间隔（默认6小时）
+        cleanup_interval = getattr(config, 'VECTOR_DB_CLEANUP_INTERVAL', 6 * 3600)
+        
+        while True:
+            try:
+                # 等待指定时间
+                await asyncio.sleep(cleanup_interval)
+                
+                # 执行清理
+                await self._perform_cleanup()
+            except Exception as e:
+                logger.error(f"[VectorStore] 定时清理任务失败: {e}")
+                # 发生错误后，等待较短时间后重试
+                await asyncio.sleep(3600)  # 1小时后重试
+    
+    async def _perform_cleanup(self):
+        """执行实际的清理操作"""
+        logger.info("[VectorStore] 开始执行定时清理任务")
+        
+        # 1. 清理过时的记忆（超过30天的记忆）
+        try:
+            # 获取所有文档
+            all_docs = self.collection.get(include=["documents", "metadatas"])
+            
+            if not all_docs["documents"]:
+                logger.info("[VectorStore] 没有需要清理的文档")
+                return
+            
+            from datetime import datetime, timedelta
+            current_time = datetime.now()
+            old_doc_ids = []
+            
+            # 找出超过30天的文档
+            for i, metadata in enumerate(all_docs["metadatas"]):
+                created_at = metadata.get("created_at")
+                if created_at:
+                    try:
+                        doc_time = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+                        if current_time - doc_time > timedelta(days=30):
+                            old_doc_ids.append(all_docs["ids"][i])
+                    except Exception:
+                        # 如果日期格式不正确，跳过
+                        continue
+            
+            # 删除过时的文档
+            if old_doc_ids:
+                self.collection.delete(ids=old_doc_ids)
+                logger.info(f"[VectorStore] 删除了 {len(old_doc_ids)} 个过时的文档")
+        except Exception as e:
+            logger.error(f"[VectorStore] 清理过时文档失败: {e}")
+        
+        # 2. 使用语义相似度清理重复内容
+        try:
+            # 获取一些示例文档作为查询，用于找出相似的文档
+            sample_docs = self.collection.get(n_results=10, include=["documents"])
+            
+            for doc in sample_docs["documents"]:
+                if doc:
+                    # 删除与示例文档相似度过高的文档（超过0.9）
+                    deleted_count = await self.delete_by_semantic(doc, threshold=0.9)
+                    if deleted_count > 0:
+                        logger.info(f"[VectorStore] 通过语义删除了 {deleted_count} 个重复文档")
+        except Exception as e:
+            logger.error(f"[VectorStore] 语义清理失败: {e}")
+        
+        logger.info("[VectorStore] 定时清理任务完成")
 
 
 vector_db = VectorMemory()

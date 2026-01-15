@@ -89,3 +89,5 @@ Desktop.ini
 /AliceBot/data/
 /AliceBot/emoji_data/
 /AliceBot/tests/
+/AliceBot/cache
+*.msgpack

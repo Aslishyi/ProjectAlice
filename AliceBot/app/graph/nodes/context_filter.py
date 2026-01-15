@@ -114,7 +114,7 @@ Return a JSON object with a "reasoning" field and a "should_reply" boolean.
 """
 
 llm = ChatOpenAI(
-    model=config.SMALL_MODEL,  # 建议统一使用 config.MODEL_NAME 或确认 config.MIMO_MODEL 存在
+    model=config.SMALL_MODEL,
     temperature=0.0,
     api_key=config.SMALL_MODEL_API_KEY,  # 建议统一配置
     base_url=config.SMALL_MODEL_URL

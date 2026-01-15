@@ -11,8 +11,8 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 class Config:
     # --- LLM Settings ---
 
-    SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
-    SILICONFLOW_BASE_URL = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
+    SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY") or os.getenv("SILICON_API_KEY")
+    SILICONFLOW_BASE_URL = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1") or os.getenv("SILICON_URL")
 
     MIMO_API_KEY = os.getenv("MIMO_API_KEY")
     MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "https://api.xiaomimimo.com/v1")
@@ -29,7 +29,7 @@ class Config:
     TEMPERATURE = 0.7
 
     # vision_router context_filter memory_saver psychology summarizer
-    SMALL_PROVIDER = "mimo"
+    SMALL_PROVIDER = "siliconflow"
     PROVIDER = "siliconflow"
     # mimo
     # aizex

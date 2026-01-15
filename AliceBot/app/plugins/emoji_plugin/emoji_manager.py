@@ -454,7 +454,8 @@ class EmojiManager:
                 # 更新现有表情包
                 existing_emoji = self.emojis[emoji_hash]
                 existing_emoji.description = description or existing_emoji.description
-                existing_emoji.emotions = emotions or existing_emoji.emotions
+                # 限制情绪标签最多1个
+                existing_emoji.emotions = emotions[:1] if emotions else existing_emoji.emotions
                 existing_emoji.tags = tags or existing_emoji.tags
                 
                 if self._save_emojis():
@@ -467,8 +468,8 @@ class EmojiManager:
             if not file_path:
                 return False, "保存图片文件失败", None
             
-            # 创建新的表情包信息
-            emoji = EmojiInfo(emoji_hash, base64_data, file_path, description, emotions, tags, category)
+            # 创建新的表情包信息，限制情绪标签最多1个
+            emoji = EmojiInfo(emoji_hash, base64_data, file_path, description, emotions[:1] if emotions else [], tags, category)
             self.emojis[emoji_hash] = emoji
             
             # 保存数据

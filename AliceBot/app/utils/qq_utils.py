@@ -463,7 +463,7 @@ def parse_onebot_array_msg(message_data: list | dict) -> Tuple[str, List[str], O
         import re
         img_urls = []
         # 尝试从字符串中提取图片URL（部分OneBot实现可能会将图片以URL形式嵌入文本）
-        img_matches = re.findall(r'https?://[^]+\.(?:jpg|jpeg|png|gif|bmp|webp)', message_data)
+        img_matches = re.findall(r'https?://[^\s]+\.(?:jpg|jpeg|png|gif|bmp|webp)', message_data)
         if img_matches:
             img_urls = [url.strip() for url in img_matches]
         return message_data, img_urls, None

@@ -27,7 +27,7 @@ llm = ChatOpenAI(
 
 def robust_json_parse(text: str) -> dict:
     """
-    增强型 JSON 解析器 - 专门修复 API 注入的脏数据
+    增强型 JSON 解析器 - 专门修复 API 注入的脏数据和处理纯文本响应
     """
     if not text: return None
 
@@ -35,24 +35,73 @@ def robust_json_parse(text: str) -> dict:
     text = re.sub(r"\[system hint:.*?\]", "", text, flags=re.IGNORECASE)
     text = text.strip()
 
-    # 提取 Markdown JSON
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if match:
-        text = match.group(1)
-    else:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1:
-            text = text[start: end + 1]
+    # 检查是否可能包含JSON
+    if "{" in text and "}" in text:
+        # 提取 Markdown JSON
+        match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if match:
+            text = match.group(1)
+        else:
+            # 找到所有可能的JSON片段
+            all_starts = [m.start() for m in re.finditer(r"\{\s*\"", text)]
+            all_ends = [m.start() for m in re.finditer(r"\}\s*", text)]
+            
+            if all_starts and all_ends:
+                # 找到最外层的JSON
+                start = all_starts[0]
+                # 找到与最外层start匹配的end
+                depth = 0
+                end = start
+                for i, c in enumerate(text[start:]):
+                    if c == "{":
+                        depth += 1
+                    elif c == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end = start + i + 1
+                            break
+                
+                if end > start:
+                    text = text[start:end]
+            else:
+                # 简单提取第一个{到最后一个}之间的内容
+                start = text.find("{")
+                end = text.rfind("}")
+                if start != -1 and end != -1:
+                    text = text[start: end + 1]
 
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
         try:
-            fixed_text = re.sub(r",\s*}", "}", text)
-            return json.loads(fixed_text)
-        except:
-            return None
+            return json.loads(text)
+        except json.JSONDecodeError:
+            try:
+                # 修复JSON格式问题
+                fixed_text = re.sub(r",\s*}", "}", text)  # 移除末尾的逗号
+                fixed_text = re.sub(r",\s*]", "]", fixed_text)  # 移除数组末尾的逗号
+                return json.loads(fixed_text)
+            except:
+                # 尝试更激进的修复
+                try:
+                    # 移除所有非JSON字符
+                    clean_text = re.sub(r"[^\x00-\x7F]+|", "", text)  # 移除非ASCII字符
+                    return json.loads(clean_text)
+                except:
+                    # 如果仍然无法解析，将其视为纯文本响应
+                    # 这种情况通常发生在LLM没有遵循格式要求时
+                    return {
+                        "monologue": "LLM返回了纯文本响应，自动包装为JSON格式",
+                        "action": "reply",
+                        "args": "",
+                        "response": text
+                    }
+    
+    # 如果不包含JSON，将纯文本包装为预期的JSON格式
+    # 这可以减少不必要的JSON解析失败警告
+    return {
+        "monologue": "LLM返回了纯文本响应，自动包装为JSON格式",
+        "action": "reply",
+        "args": "",
+        "response": text
+    }
 
 
 async def agent_node(state: AgentState):
@@ -203,12 +252,15 @@ async def agent_node(state: AgentState):
             
             if retrieval_result["has_relevant_memory"]:
                 logger.info(f"[{ts}] 📖 [Smart RAG] Found relevant memories")
+                logger.info(f"[{ts}] 📖 [Smart RAG] Retrieved memory content: {retrieval_result['memory_content']}")
                 memory_context = f"【相关回忆】\n" + retrieval_result["memory_content"]
             else:
                 # 如果智能记忆检索失败，回退到传统RAG检索
                 logger.info(f"[{ts}] 📖 [Fallback RAG] Using traditional retrieval")
                 docs = await vector_db.search(query_text, k=3)
+                logger.info(f"[{ts}] 📖 [Fallback RAG] Retrieved {len(docs) if docs else 0} documents")
                 if docs:
+                    logger.info(f"[{ts}] 📖 [Fallback RAG] Raw documents: {docs}")
                     # 过滤检索结果中的表情包信息
                     filtered_docs = []
                     for doc in docs:
@@ -216,20 +268,27 @@ async def agent_node(state: AgentState):
                         filtered_doc = re.sub(r"【表情包:.*?】", "", doc)
                         if filtered_doc.strip():
                             filtered_docs.append(filtered_doc.strip())
+                    logger.info(f"[{ts}] 📖 [Fallback RAG] Filtered to {len(filtered_docs)} documents")
                     if filtered_docs:
+                        logger.info(f"[{ts}] 📖 [Fallback RAG] Final filtered documents: {filtered_docs}")
                         memory_context = f"【相关回忆】\n" + "\n".join(filtered_docs)
     except Exception as e:
         logger.error(f"[{ts}] [Smart RAG Error] {e}")
         # 异常情况下回退到传统RAG检索
         try:
+            logger.info(f"[{ts}] 📖 [Exception RAG] Falling back to traditional retrieval due to Smart RAG error")
             docs = await vector_db.search(query_text, k=3)
+            logger.info(f"[{ts}] 📖 [Exception RAG] Retrieved {len(docs) if docs else 0} documents")
             if docs:
+                logger.info(f"[{ts}] 📖 [Exception RAG] Raw documents: {docs}")
                 filtered_docs = []
                 for doc in docs:
                     filtered_doc = re.sub(r"【表情包:.*?】", "", doc)
                     if filtered_doc.strip():
                         filtered_docs.append(filtered_doc.strip())
+                logger.info(f"[{ts}] 📖 [Exception RAG] Filtered to {len(filtered_docs)} documents")
                 if filtered_docs:
+                    logger.info(f"[{ts}] 📖 [Exception RAG] Final filtered documents: {filtered_docs}")
                     memory_context = f"【相关回忆】\n" + "\n".join(filtered_docs)
         except Exception as fallback_e:
             logger.error(f"[{ts}] [Fallback RAG Error] {fallback_e}")
@@ -277,9 +336,9 @@ async def agent_node(state: AgentState):
 
     # 构造 Prompt
     format_instruction = """
-    # 强制响应格式要求
+    # 强制响应格式要求 - 必须严格遵守
     YOU MUST OUTPUT A VALID JSON OBJECT ONLY. NO OTHER TEXT OR EXPLANATION ALLOWED.
-    YOU WILL BE PUNISHED IF YOU FAIL TO FOLLOW THIS INSTRUCTION.
+    YOU WILL BE PUNISHED SEVERELY IF YOU FAIL TO FOLLOW THIS INSTRUCTION.
     
     Response Format:
     {
@@ -289,7 +348,21 @@ async def agent_node(state: AgentState):
       "response": "要发送给用户的回复内容"
     }
     
-    Example:
+    # 重要说明：
+    1. 必须包含所有四个字段：monologue, action, args, response
+    2. action字段只能是"reply"
+    3. response字段不能为空
+    4. 所有字段值必须用双引号包围
+    5. 不能有任何多余的文本，包括Markdown格式、注释等
+    6. 必须是有效的JSON格式
+    
+    # 错误示例（会被惩罚）：
+    - 哦，这是一个很好的问题！{"response": "好的，我会帮助你"}
+    - ```json {"response": "你好"} ```
+    - {"response": "你好"} （缺少必要字段）
+    - {'response': '你好'} （使用单引号）
+    
+    # 正确示例（必须严格按照此格式）：
     {"monologue": "用户问我喜欢什么颜色，我应该回答蓝色", "action": "reply", "args": "", "response": "我喜欢蓝色"}
     """
 
@@ -464,8 +537,9 @@ async def agent_node(state: AgentState):
         if parsed_result:
             parsed = parsed_result
         else:
-            logger.warning(f"[{ts}] ⚠️ [Agent JSON Fail] Raw: {content[:50]}...")
-            parsed = {"monologue": "Raw Text", "action": "reply", "response": content}
+            # 这种情况理论上不应该发生，因为robust_json_parse现在总是返回一个有效的JSON对象
+            logger.error(f"[{ts}] ❌ [Agent JSON Parse Fatal Error] Raw: {content[:50]}...")
+            parsed = {"monologue": "JSON Parse Fatal Error", "action": "reply", "response": "Someone tells Aslishyi there is a problem with his Alice."}
         
         # 智能添加表情包到回复中
         if parsed.get("action") == "reply":
@@ -489,28 +563,40 @@ async def agent_node(state: AgentState):
                         emotion_intensity = abs(valence) + abs(arousal)
                         response_length = len(response_content)
                         
+                        # 检查是否连续使用了表情包
+                        consecutive_emoji = False
+                        if msgs and len(msgs) > 1:
+                            # 检查上一条机器人回复是否包含表情包
+                            last_bot_msg = next((msg for msg in reversed(msgs[:-1]) if hasattr(msg, "role") and msg.role == "assistant"), None)
+                            if last_bot_msg and hasattr(last_bot_msg, "content") and "[表情:" in last_bot_msg.content:
+                                consecutive_emoji = True
+                        
                         if conversation_type == "group":
-                            # 群聊中更谨慎地使用表情包，但比之前更灵活
+                            # 群聊中更谨慎地使用表情包
                             if intimacy > 50:  # 与用户有一定关系
                                 # 情感强烈或回复较短时更可能发送表情
-                                if ((emotion_intensity > 0.5 and random.random() < 0.5) or \
-                                   (emotion_intensity > 0.8 and random.random() < 0.8)):
+                                if ((emotion_intensity > 0.6 and random.random() < 0.3) or \
+                                   (emotion_intensity > 0.9 and random.random() < 0.5)):
                                     emoji_count = 1
                         else:
-                            # 私聊中更自然地使用表情包
-                            if intimacy > 40:  # 与用户有一定关系
-                                # 情感适中以上且随机概率
-                                if ((emotion_intensity > 0.3 and random.random() < 0.6) or \
-                                   (emotion_intensity > 0.7 and random.random() < 0.9)):
+                            # 私聊中更自然地使用表情包，但降低频率
+                            if intimacy > 50:  # 提高亲密程度阈值
+                                # 情感适中以上且随机概率，降低概率值
+                                if ((emotion_intensity > 0.4 and random.random() < 0.3) or \
+                                   (emotion_intensity > 0.8 and random.random() < 0.6)):
                                     emoji_count = 1
                         
                         # 回复内容过短或过长时调整概率
                         if response_length < 10:
                             # 短回复时更谨慎发送表情
-                            emoji_count = 0 if random.random() < 0.3 else emoji_count
+                            emoji_count = 0 if random.random() < 0.7 else emoji_count
                         elif response_length > 100:
-                            # 长回复时更可能发送表情来缓解阅读压力
-                            emoji_count = 1 if random.random() < 0.4 else emoji_count
+                            # 长回复时更可能发送表情来缓解阅读压力，但降低概率
+                            emoji_count = 1 if random.random() < 0.2 else emoji_count
+                        
+                        # 避免连续使用表情包
+                        if consecutive_emoji and emoji_count > 0:
+                            emoji_count = 0 if random.random() < 0.8 else emoji_count
                         
                         if emoji_count > 0:
                             # 从对话历史中提取上下文信息
@@ -531,6 +617,126 @@ async def agent_node(state: AgentState):
     except Exception as e:
         logger.error(f"[{ts}]❌ [Agent LLM Error] {e}")
 
+    # 记录用户表达习惯和重要信息
+    try:
+        # 分析用户的表达习惯
+        if last_human_content:
+            # 计算消息长度特征
+            msg_length = len(last_human_content)
+            
+            # 表情符号分析
+            emoji_pattern = re.compile(r'[\u2600-\u27BF]|\[表情\]')
+            emojis = emoji_pattern.findall(last_human_content)
+            emoji_count = len(emojis)
+            
+            # 标点符号分析
+            punctuation_pattern = re.compile(r'[!！?？。，、；：…]')
+            punctuations = punctuation_pattern.findall(last_human_content)
+            punctuation_count = len(punctuations)
+            
+            # 问句分析
+            question_pattern = re.compile(r'[?？]')
+            questions = question_pattern.findall(last_human_content)
+            question_count = len(questions)
+            
+            # 感叹句分析
+            exclamation_pattern = re.compile(r'[!！]')
+            exclamations = exclamation_pattern.findall(last_human_content)
+            exclamation_count = len(exclamations)
+            
+            # 重复字符分析
+            repeat_pattern = re.compile(r'(.)\1{2,}')
+            repeats = repeat_pattern.findall(last_human_content)
+            repeat_count = len(repeats)
+            
+            # 记录表达习惯（基于使用频率和上下文）
+            # 表情符号使用习惯
+            if emoji_count > 0:
+                if emoji_count >= 3:
+                    relation_db.add_expression_habit(real_user_id, "喜欢频繁使用表情符号", confidence=0.9)
+                elif emoji_count >= 1:
+                    relation_db.add_expression_habit(real_user_id, "偶尔使用表情符号", confidence=0.7)
+            
+            # 标点符号使用习惯
+            if punctuation_count > 0:
+                punctuation_ratio = punctuation_count / msg_length
+                if punctuation_ratio > 0.1:
+                    relation_db.add_expression_habit(real_user_id, "使用丰富的标点符号", confidence=0.8)
+                elif punctuation_ratio > 0.05:
+                    relation_db.add_expression_habit(real_user_id, "使用规范的标点符号", confidence=0.6)
+            
+            # 问句使用习惯
+            if question_count > 0:
+                if question_count >= 3:
+                    relation_db.add_expression_habit(real_user_id, "经常提出多个问题", confidence=0.9)
+                elif question_count >= 1:
+                    relation_db.add_expression_habit(real_user_id, "偶尔使用问句", confidence=0.7)
+            
+            # 感叹句使用习惯
+            if exclamation_count > 0:
+                if exclamation_count >= 2:
+                    relation_db.add_expression_habit(real_user_id, "经常使用感叹句表达情绪", confidence=0.8)
+                else:
+                    relation_db.add_expression_habit(real_user_id, "偶尔使用感叹句", confidence=0.6)
+            
+            # 重复字符使用习惯
+            if repeat_count > 0:
+                relation_db.add_expression_habit(real_user_id, "偶尔使用重复字符强调", confidence=0.7)
+            
+            # 消息长度习惯
+            if msg_length > 100:
+                relation_db.add_expression_habit(real_user_id, "喜欢发送长消息", confidence=0.8)
+            elif msg_length < 20:
+                relation_db.add_expression_habit(real_user_id, "喜欢发送短消息", confidence=0.8)
+        
+        # 记录重要记忆点（更智能的判断逻辑）
+        if query_text and len(query_text) > 5:
+            # 定义重要信息的模式
+            important_patterns = [
+                # 个人信息（年龄、性别、职业等）
+                r'(?:我(?:今年|现在)?(?:是|有)?(?:\d+|多少)?岁)|(?:我的(?:名字|年龄|性别|职业|生日|爱好|喜欢)是?.*)',
+                # 事件信息（时间、地点、人物等）
+                r'(?:(?:今天|明天|后天|昨天|上周|下周|去年|今年)(?:\w+)?)|(?:在(?:哪里|哪个地方|什么位置))|(?:和(?:谁|什么人))',
+                # 情绪表达
+                r'(?:(?:我觉得|我感到|我认为)(?:很|非常|有点)(?:开心|高兴|难过|伤心|生气|愤怒|失望|期待|紧张))',
+                # 需求和请求
+                r'(?:请(?:帮我|给我|告诉我|教我)|(?:我想|我要|我需要)(?:\w+))'
+            ]
+            
+            # 检查是否包含重要信息
+            has_important_info = False
+            for pattern in important_patterns:
+                if re.search(pattern, query_text, re.IGNORECASE):
+                    has_important_info = True
+                    break
+            
+            # 记录重要记忆点
+            if has_important_info:
+                # 尝试提取记忆点的类型
+                memory_type = "普通对话"
+                if re.search(r'我的(?:名字|年龄|性别|职业|生日|爱好|喜欢)', query_text, re.IGNORECASE):
+                    memory_type = "个人信息"
+                elif re.search(r'(?:今天|明天|后天|昨天|上周|下周|去年|今年)', query_text):
+                    memory_type = "事件信息"
+                elif re.search(r'(?:我觉得|我感到|我认为)(?:很|非常|有点)(?:开心|高兴|难过|伤心|生气|愤怒|失望|期待|紧张)', query_text):
+                    memory_type = "情绪表达"
+                elif re.search(r'(?:请(?:帮我|给我|告诉我|教我)|(?:我想|我要|我需要))', query_text):
+                    memory_type = "需求请求"
+                
+                # 根据信息重要性设置权重
+                weight = 1.0
+                if memory_type in ["个人信息", "重要事件"]:
+                    weight = 2.0
+                elif memory_type in ["情绪表达", "需求请求"]:
+                    weight = 1.5
+                
+                relation_db.add_memory_point(real_user_id, memory_type, query_text[:150], weight=weight)
+            elif len(query_text) > 50:
+                # 长消息即使没有明显的重要信息也可能包含有价值的内容
+                relation_db.add_memory_point(real_user_id, "长文本对话", query_text[:150], weight=0.8)
+    except Exception as e:
+        logger.error(f"[{ts}] ❌ [Memory Record Error] {e}")
+    
     # 构造返回
     ai_msg = AIMessage(content=parsed.get("response", "..."))
     # 根据是否需要调用工具设置next_step

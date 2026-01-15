@@ -140,12 +140,23 @@ async def psychology_node(state: AgentState):
         # 6. 执行关系维度更新 (使用唯一 ID)
         relation_deltas = data.get("relation_deltas", {})
         if relation_deltas:
-            updated_dimensions = relation_db.update_relationship_dimensions(user_id, relation_deltas)
+            # 保存更新前的关系维度值
+            old_dimensions = {
+                "intimacy": getattr(rel, "intimacy", 50),
+                "familiarity": getattr(rel, "familiarity", 50),
+                "trust": getattr(rel, "trust", 50),
+                "interest_match": getattr(rel, "interest_match", 50)
+            }
+            
+            # 更新关系维度
+            updated_dimensions = await relation_db.update_relationship_dimensions(user_id, relation_deltas)
+            
             # 记录日志
             if updated_dimensions:
                 log_msg = f"[{ts}]❤️ [Relation] {user_display_name}({user_id}):"
                 for dim, new_value in updated_dimensions.items():
-                    old_value = getattr(rel, dim, 50)
+                    # 使用更新前保存的旧值
+                    old_value = old_dimensions.get(dim, 50)
                     delta = new_value - old_value
                     log_msg += f" {dim}: {old_value} -> {new_value} (Delta: {delta})"
                 logger.info(log_msg)
@@ -153,8 +164,10 @@ async def psychology_node(state: AgentState):
             # 兼容旧格式
             i_delta = data.get("intimacy_delta", 0)
             if i_delta != 0:
+                # 保存更新前的好感度值
+                old_intimacy = getattr(rel, "intimacy", 50)
                 new_intimacy = relation_db.update_intimacy(user_id, i_delta)
-                logger.info(f"[{ts}]❤️ [Relation] {user_display_name}({user_id}): {rel.intimacy} -> {new_intimacy} (Delta: {i_delta})")
+                logger.info(f"[{ts}]❤️ [Relation] {user_display_name}({user_id}): {old_intimacy} -> {new_intimacy} (Delta: {i_delta})")
 
         # 7. 获取更新后的情绪和关系数据
         updated_emotion = global_store.get_emotion_snapshot()

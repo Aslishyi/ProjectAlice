@@ -23,7 +23,7 @@ class CombinedMemoryManager:
     """
     
     def __init__(self):
-        # 初始化LLM
+        # 初始化LLM - ChatOpenAI本身支持异步操作
         self.llm = ChatOpenAI(
             model=config.SMALL_MODEL,
             temperature=0.0,
@@ -56,8 +56,9 @@ class CombinedMemoryManager:
             first_key = next(iter(self.entity_store))
             del self.entity_store[first_key]
         
-        # 更新知识图谱记忆
-        self.kg_memory.save_context({
+        # 更新知识图谱记忆（将同步方法包装在异步线程中执行）
+        import asyncio
+        await asyncio.to_thread(self.kg_memory.save_context, {
             "input": f"User {user_name}: {user_input}"
         }, {
             "output": ai_response
@@ -85,7 +86,8 @@ class CombinedMemoryManager:
         
         # 2. 获取知识图谱记忆
         try:
-            kg = self.kg_memory.kg.get_triples()
+            import asyncio
+            kg = await asyncio.to_thread(self.kg_memory.kg.get_triples)
             relevant_memory["knowledge_graph"] = kg
         except Exception as e:
             logger.error(f"❌ [Memory] Failed to get knowledge graph: {e}")
@@ -99,7 +101,7 @@ class CombinedMemoryManager:
         
         return relevant_memory
     
-    def get_relationship_insights(self, user_name: str, target_name: str) -> List[Dict[str, Any]]:
+    async def get_relationship_insights(self, user_name: str, target_name: str) -> List[Dict[str, Any]]:
         """
         获取两个人之间的关系洞察
         """
@@ -107,7 +109,8 @@ class CombinedMemoryManager:
         
         # 从知识图谱中提取关系
         try:
-            kg = self.kg_memory.kg.get_triples()
+            import asyncio
+            kg = await asyncio.to_thread(self.kg_memory.kg.get_triples)
             for triple in kg:
                 if (user_name.lower() in triple[0].lower() or user_name.lower() in triple[2].lower()) and \
                    (target_name.lower() in triple[0].lower() or target_name.lower() in triple[2].lower()):
@@ -121,7 +124,7 @@ class CombinedMemoryManager:
         
         return insights
     
-    def clear_session(self):
+    async def clear_session(self):
         """
         清除会话记忆（保留长期记忆）
         """
@@ -129,7 +132,8 @@ class CombinedMemoryManager:
         self.entity_store = {}
         
         # 知识图谱记忆可以通过重置kg实现
-        self.kg_memory.kg = type(self.kg_memory.kg)()
+        import asyncio
+        await asyncio.to_thread(lambda: setattr(self.kg_memory, 'kg', type(self.kg_memory.kg)()))
     
     async def smart_retrieve(self, query: str, chat_history: str, sender: str, user_id: str) -> Dict[str, Any]:
         """
@@ -185,10 +189,11 @@ class CombinedMemoryManager:
             
             # 从知识图谱中删除相关三元组
             try:
-                kg = self.kg_memory.kg.get_triples()
+                import asyncio
+                kg = await asyncio.to_thread(self.kg_memory.kg.get_triples)
                 for triple in kg:
                     if query.lower() in triple[0].lower() or query.lower() in triple[2].lower():
-                        self.kg_memory.kg.remove_triple(triple)
+                        await asyncio.to_thread(self.kg_memory.kg.remove_triple, triple)
             except Exception as e:
                 logger.error(f"❌ [Memory] Failed to remove knowledge graph triples: {e}")
             
@@ -236,10 +241,11 @@ class CombinedMemoryManager:
             
             # 从知识图谱中删除相关三元组
             try:
-                kg = self.kg_memory.kg.get_triples()
+                import asyncio
+                kg = await asyncio.to_thread(self.kg_memory.kg.get_triples)
                 for triple in kg:
                     if keyword.lower() in triple[0].lower() or keyword.lower() in triple[2].lower():
-                        self.kg_memory.kg.remove_triple(triple)
+                        await asyncio.to_thread(self.kg_memory.kg.remove_triple, triple)
             except Exception as e:
                 logger.error(f"❌ [Memory] Failed to remove knowledge graph triples: {e}")
             
@@ -283,7 +289,8 @@ class CombinedMemoryManager:
             
             # 更新知识图谱记忆（需要模拟一个对话来添加）
             try:
-                self.kg_memory.save_context(
+                import asyncio
+                await asyncio.to_thread(self.kg_memory.save_context,
                     {"input": f"系统修正: {incorrect_memory} 是错误的，正确的应该是 {correct_memory}"},
                     {"output": "已修正记忆"}
                 )
@@ -316,7 +323,8 @@ class CombinedMemoryManager:
             self.entity_store = {}
             
             # 清除知识图谱记忆 - 不使用Neo4jGraph
-            self.kg_memory.kg = type(self.kg_memory.kg)()
+            import asyncio
+            await asyncio.to_thread(lambda: setattr(self.kg_memory, 'kg', type(self.kg_memory.kg)()))
             
             logger.info("✅ [Memory] All memory cleared successfully")
             return True

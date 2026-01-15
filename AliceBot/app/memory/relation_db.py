@@ -71,6 +71,20 @@ class GlobalRelationDB:
         
         # 检查是否需要从JSON迁移数据
         self._migrate_from_json()
+        
+        # 标记清理任务未启动
+        self._cleanup_task_started = False
+    
+    def start_cleanup_task(self):
+        """手动启动定时清理任务
+        
+        只有当有运行的事件循环时才能调用此方法
+        """
+        if not self._cleanup_task_started:
+            import asyncio
+            asyncio.create_task(self._start_cleanup_task())
+            self._cleanup_task_started = True
+            logger.info("[RelationDB] 定时清理任务已启动")
     
     def calculate_memory_point_weight(self, memory_content: str, interaction_count: int = 1, recency: int = 1) -> float:
         """
@@ -608,6 +622,11 @@ class GlobalRelationDB:
                 profile.updated_at = str(time.time())
                 db.commit()
                 
+                # 更新后清除缓存
+                import asyncio
+                from app.utils.cache import cached_user_info_set
+                asyncio.create_task(cached_user_info_set(user_qq, None))
+                
                 return new_intimacy
             else:
                 # 用户不存在，创建新用户
@@ -630,13 +649,15 @@ class GlobalRelationDB:
         finally:
             db.close()
 
-    def update_relationship_dimensions(self, user_qq: str, deltas: Dict[str, int]):
+    async def update_relationship_dimensions(self, user_qq: str, deltas: Dict[str, int]):
         """
         更新关系的多个维度（好感度、熟悉度、信任度、兴趣匹配等）
         :param user_qq: 用户QQ号
         :param deltas: 包含各个维度变化值的字典，例如：{"intimacy": 2, "familiarity": 1}
         :return: 更新后的关系维度字典
         """
+        from app.utils.cache import cached_user_info_set
+        
         user_qq = str(user_qq)
         db = SessionLocal()
         
@@ -654,26 +675,35 @@ class GlobalRelationDB:
                         "interest_match": 50
                     }
                 
+                # 创建一个全新的字典来确保SQLAlchemy检测到变化
+                updated_relationship_data = dict(relationship_data)
+                
                 # 确保所有维度都有默认值
                 for dimension in ["intimacy", "familiarity", "trust", "interest_match"]:
-                    if dimension not in relationship_data:
+                    if dimension not in updated_relationship_data:
                         if dimension == "intimacy":
-                            relationship_data[dimension] = 60
+                            updated_relationship_data[dimension] = 60
                         else:
-                            relationship_data[dimension] = 50
+                            updated_relationship_data[dimension] = 50
                 
                 # 更新各个维度
                 updated_dimensions = {}
                 for dimension, delta in deltas.items():
                     if dimension in ["intimacy", "familiarity", "trust", "interest_match"]:
-                        current_value = relationship_data.get(dimension, 50)
+                        current_value = updated_relationship_data.get(dimension, 50)
                         new_value = max(0, min(100, current_value + delta))
-                        relationship_data[dimension] = new_value
+                        updated_relationship_data[dimension] = new_value
                         updated_dimensions[dimension] = new_value
                 
-                profile.relationship_data = relationship_data
+                # 更新关系数据（使用全新字典确保SQLAlchemy检测到变化）
+                profile.relationship_data = updated_relationship_data
                 profile.updated_at = str(time.time())
+                
+                # 提交更改
                 db.commit()
+                
+                # 更新后清除缓存
+                await cached_user_info_set(user_qq, None)
                 
                 return updated_dimensions
             else:
@@ -816,13 +846,14 @@ class GlobalRelationDB:
         finally:
             db.close()
 
-    def add_expression_habit(self, user_qq: str, habit: str) -> bool:
+    def add_expression_habit(self, user_qq: str, habit: str, confidence: float = 1.0) -> bool:
         """
-        添加表达习惯到用户关系中
+        添加表达习惯到用户关系中，避免重复记录
         
         Args:
             user_qq: 用户QQ号
             habit: 表达习惯内容
+            confidence: 识别置信度（0-1）
             
         Returns:
             bool: 是否添加成功
@@ -850,8 +881,33 @@ class GlobalRelationDB:
                 if "expression_habits" not in relationship_data:
                     relationship_data["expression_habits"] = []
                 
-                # 添加表达习惯
-                relationship_data["expression_habits"].append(habit)
+                # 检查是否已存在相同的表达习惯，避免重复
+                habit_exists = False
+                for existing_habit in relationship_data["expression_habits"]:
+                    if isinstance(existing_habit, str):
+                        if existing_habit == habit:
+                            habit_exists = True
+                            break
+                    elif isinstance(existing_habit, dict):
+                        if existing_habit.get("habit") == habit:
+                            habit_exists = True
+                            # 如果存在，更新置信度和出现次数
+                            existing_habit["confidence"] = max(existing_habit.get("confidence", 0), confidence)
+                            existing_habit["count"] = existing_habit.get("count", 0) + 1
+                            existing_habit["last_used"] = str(time.time())
+                            break
+                
+                # 如果不存在，添加新的表达习惯
+                if not habit_exists:
+                    # 使用结构化的方式存储表达习惯，包含更多元数据
+                    structured_habit = {
+                        "habit": habit,
+                        "confidence": confidence,
+                        "count": 1,
+                        "created_at": str(time.time()),
+                        "last_used": str(time.time())
+                    }
+                    relationship_data["expression_habits"].append(structured_habit)
                 
                 profile.relationship_data = relationship_data
                 profile.updated_at = str(time.time())
@@ -859,6 +915,15 @@ class GlobalRelationDB:
                 return True
             else:
                 # 用户不存在，创建新用户
+                # 使用结构化的方式存储表达习惯
+                structured_habit = {
+                    "habit": habit,
+                    "confidence": confidence,
+                    "count": 1,
+                    "created_at": str(time.time()),
+                    "last_used": str(time.time())
+                }
+                
                 relationship_data = {
                     "target_id": user_qq,
                     "intimacy": 60,
@@ -866,7 +931,7 @@ class GlobalRelationDB:
                     "trust": 50,
                     "interest_match": 50,
                     "memory_points": [],
-                    "expression_habits": [habit]
+                    "expression_habits": [structured_habit]
                 }
                 
                 new_profile = UserProfileModel(
@@ -1139,6 +1204,87 @@ class GlobalRelationDB:
             return ""
         finally:
             db.close()
+    
+    async def _start_cleanup_task(self):
+        """启动定时清理任务"""
+        import time
+        import asyncio
+        
+        # 定时清理间隔（默认12小时）
+        cleanup_interval = 12 * 3600
+        
+        while True:
+            try:
+                # 等待指定时间
+                await asyncio.sleep(cleanup_interval)
+                
+                # 执行清理
+                self._perform_cleanup()
+            except Exception as e:
+                logger.error(f"[RelationDB] 定时清理任务失败: {e}")
+                # 发生错误后，等待较短时间后重试
+                await asyncio.sleep(3600)  # 1小时后重试
+    
+    def _perform_cleanup(self):
+        """执行实际的清理操作"""
+        logger.info("[RelationDB] 开始执行定时清理任务")
+        
+        # 清理过时的记忆点（超过60天的记忆点）
+        try:
+            from datetime import datetime, timedelta
+            current_time = datetime.now()
+            old_threshold = current_time - timedelta(days=60)
+            
+            db = SessionLocal()
+            try:
+                # 获取所有用户资料
+                all_profiles = db.query(UserProfileModel).all()
+                updated_count = 0
+                
+                for profile in all_profiles:
+                    if profile.relationship_data:
+                        relationship_data = profile.relationship_data
+                        memory_points = relationship_data.get("memory_points", [])
+                        
+                        # 过滤掉过时的记忆点
+                        new_memory_points = []
+                        for mp in memory_points:
+                            # 解析记忆点
+                            parts = mp.split(":", 3)
+                            if len(parts) >= 4:
+                                try:
+                                    created_time = float(parts[3])
+                                    # 转换为datetime对象
+                                    mp_time = datetime.fromtimestamp(created_time)
+                                    # 如果记忆点不超过60天，保留
+                                    if mp_time > old_threshold:
+                                        new_memory_points.append(mp)
+                                except Exception:
+                                    # 如果日期格式不正确，保留记忆点
+                                    new_memory_points.append(mp)
+                            else:
+                                # 如果记忆点格式不正确，保留
+                                new_memory_points.append(mp)
+                        
+                        # 如果有记忆点被删除，更新用户资料
+                        if len(new_memory_points) != len(memory_points):
+                            relationship_data["memory_points"] = new_memory_points
+                            profile.relationship_data = relationship_data
+                            profile.updated_at = str(time.time())
+                            updated_count += 1
+                
+                # 提交更改
+                db.commit()
+                logger.info(f"[RelationDB] 清理了 {updated_count} 个用户的过时记忆点")
+            except SQLAlchemyError as e:
+                db.rollback()
+                logger.error(f"[RelationDB] 清理记忆点数据库操作失败: {str(e)}")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"[RelationDB] 清理记忆点失败: {e}")
+        
+        logger.info("[RelationDB] 定时清理任务完成")
 
 
 # 创建全局实例

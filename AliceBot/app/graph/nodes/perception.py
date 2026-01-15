@@ -212,7 +212,7 @@ def _classify_image(image: Image.Image, file_size_kb: float) -> str:
     """
     width, height = image.size
     ratio = width / height if height > 0 else 0
-    is_square_ish = 0.7 < ratio < 1.4  # 更严格的正方形比例限制，表情包通常接近正方形
+    is_square_ish = 0.5 < ratio < 1.6
     has_transparency = image.mode in ('RGBA', 'LA') or ('transparency' in image.info)
     
     # 小图标判断
@@ -240,17 +240,15 @@ def _classify_image(image: Image.Image, file_size_kb: float) -> str:
     has_photo_characteristics = (is_large or is_non_square or is_large_file) and not has_transparency
     
     # 综合判断
-    if has_sticker_characteristics:
-        logger.info(f"👁️ -> Classified as STICKER ({width}x{height}, {file_size_kb:.1f}KB, ratio: {ratio:.2f})")
-        return "sticker"
-    elif has_photo_characteristics:
+    if has_photo_characteristics:
         logger.info(f"👁️ -> Classified as PHOTO ({width}x{height}, {file_size_kb:.1f}KB, ratio: {ratio:.2f})")
         return "photo"
-    else:
-        # 边界情况，进一步分析
-        # 优先考虑表情包，因为误判表情包为图片的影响比误判图片为表情包小
-        logger.info(f"👁️ -> Classified as STICKER (border case: {width}x{height}, {file_size_kb:.1f}KB, ratio: {ratio:.2f})")
+    elif has_sticker_characteristics:
+        logger.info(f"👁️ -> Classified as STICKER ({width}x{height}, {file_size_kb:.1f}KB, ratio: {ratio:.2f})")
         return "sticker"
+    else:
+        logger.info(f"👁️ -> Else Classified as PHOTO ({width}x{height}, {file_size_kb:.1f}KB, ratio: {ratio:.2f})")
+        return "photo"
 
 
 
