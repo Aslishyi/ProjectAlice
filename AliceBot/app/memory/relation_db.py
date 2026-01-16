@@ -39,6 +39,8 @@ class Relationship(BaseModel):
     memory_points: List[str] = Field(default_factory=list)  # 记忆点列表，格式：category:content:weight:timestamp
     expression_habits: List[str] = Field(default_factory=list)  # 表达习惯列表
     group_nicknames: List[Dict[str, str]] = Field(default_factory=list)  # 群昵称列表，每个元素包含group_id和nickname
+    last_interaction_time: float = Field(default_factory=time.time)  # 最后一次交互时间
+    stamina: float = Field(default=80.0)  # 体力值
     
     # 新增字段
     communication_style: str = "casual"  # 沟通风格: casual, formal, playful

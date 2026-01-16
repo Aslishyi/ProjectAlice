@@ -973,6 +973,7 @@ is_main_process = os.environ.get('UVICORN_WORKER_ID') is None
 async def lifespan(app: FastAPI):
     import os
     from app.plugins.plugin_manager import plugin_manager
+    from app.core.persona_manager import persona_vector_manager
     
     # 加载和初始化插件系统
     plugin_dir = os.path.join(os.path.dirname(__file__), "app", "plugins")
@@ -986,11 +987,18 @@ async def lifespan(app: FastAPI):
     # 启动DreamCycle
     # DreamCycle内部有文件锁机制，确保只有一个进程能成功启动
     await dream_machine.start()
+    
+    # 初始化人设向量存储
+    try:
+        await persona_vector_manager.load_and_index_persona()
+        logger.info("✅ Persona Vector Store Initialized.")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize Persona Vector Store: {e}")
 
     # 🚀 启动主动任务循环
     proactive_task = asyncio.create_task(bot_manager.run_proactive_check())
 
-    logger.info("✅ System Started (Reactive + Proactive).")
+    logger.info("✅ System Started (Reactive + Proactive + Persona Vector Store).")
     yield
 
     # 停止

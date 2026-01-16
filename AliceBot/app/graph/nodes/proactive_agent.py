@@ -340,6 +340,8 @@ async def proactive_node(state: AgentState):
         # 8. 生成主动内容
         # 准备SOCIAL_VOLITION_PROMPT所需的参数
         current_time = datetime.now().strftime("%H:%M")
+        # 计算沉默时长（小时）
+        silence_hours = (time.time() - last_interaction_time) / 3600
         silence_duration = f"{silence_hours:.1f}小时"
         stamina = getattr(rel, "stamina", 80.0)  # 使用默认值80.0如果没有
         chat_type = "group" if is_group else "private"

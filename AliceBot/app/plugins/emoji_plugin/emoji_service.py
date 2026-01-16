@@ -7,15 +7,14 @@ import logging
 import random
 import re
 import hashlib
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 from PIL import Image
 import io
 import base64
 from functools import lru_cache
 
 from .emoji_manager import EmojiInfo, get_emoji_manager
-from app.graph.nodes.perception import _classify_image
-from app.graph.nodes.perception import _analyze_emoji_with_llm
+from app.graph.nodes.perception import _classify_image, _analyze_emoji_with_llm, _process_image_with_llm
 
 logger = logging.getLogger("EmojiService")
 
@@ -51,7 +50,7 @@ class EmojiService:
         # 缓存大小限制
         self._CACHE_SIZE = 1000
     
-    def is_emoji(self, image: Image.Image, file_size_kb: float) -> bool:
+    async def is_emoji(self, image: Image.Image, file_size_kb: float) -> bool:
         """
         判断图片是否为表情包
         
@@ -63,7 +62,7 @@ class EmojiService:
             bool: 是否为表情包
         """
         try:
-            return _classify_image(image, file_size_kb) == "sticker"
+            return await _classify_image(image, file_size_kb) == "sticker"
         except Exception as e:
             logger.error(f"❌ 图片分类失败: {e}")
             # 出错时使用本地备份逻辑
@@ -75,7 +74,7 @@ class EmojiService:
             except:
                 return False
     
-    async def analyze_emoji(self, base64_data: str) -> Dict[str, any]:
+    async def analyze_emoji(self, base64_data: str) -> Dict[str, Any]:
         """
         分析表情包，生成情绪标签、描述和分类
         
@@ -95,7 +94,7 @@ class EmojiService:
                 "category": "其他"
             }
     
-    async def process_emoji(self, image_url: str, user_qq: str = "", user_nickname: str = "") -> Dict[str, any]:
+    async def process_emoji(self, image_url: str, user_qq: str = "", user_nickname: str = "") -> Dict[str, Any]:
         """
         完整处理表情包流程：下载、识别、分析、保存
         
@@ -123,44 +122,52 @@ class EmojiService:
             if not base64_data:
                 return {"success": False, "message": "下载表情包失败"}
             
-            # 判断是否为真正的表情包 - 明确边界
+            # 判断是否为真正的表情包并同时分析 - 减少LLM调用次数
             base64_clean = base64_data.encode("ascii", errors="ignore").decode("ascii")
             image_bytes = base64.b64decode(base64_clean)
             image = Image.open(io.BytesIO(image_bytes))
             width, height = image.size
             file_size_kb = len(image_bytes) / 1024
             
-            # 明确的边界判断：直接调用_classify_image获取详细分类
-            classification = _classify_image(image, file_size_kb)
-            logger.info(f"🔍 图片分类结果: {classification} ({width}x{height}, {file_size_kb:.1f}KB)")
-            
-            # 明确的边界：只有分类为"sticker"的图片才被视为表情包
-            if classification != "sticker":
-                if classification == "photo":
-                    logger.info(f"📷 跳过普通照片，不保存为表情包 ({width}x{height}, {file_size_kb:.1f}KB)")
-                elif classification == "icon":
-                    logger.info(f"🔤 跳过小图标，不保存为表情包 ({width}x{height}, {file_size_kb:.1f}KB)")
-                else:
-                    logger.info(f"❓ 跳过未知类型，不保存为表情包 ({width}x{height}, {file_size_kb:.1f}KB)")
-                
-                # 明确返回失败，指示这不是表情包
+            # 小图标判断 - 仍然使用本地规则，因为小图标明显不是表情包
+            if width < 50 or height < 50:
+                classification = "icon"
+                logger.info(f"� 跳过小图标，不保存为表情包 ({width}x{height}, {file_size_kb:.1f}KB)")
                 return {"success": False, "message": f"不是表情包 (分类: {classification})", "classification": classification}
             
             # 确保图片尺寸适中，避免过大的图片被误分类为表情包
             if width > 2048 or height > 2048:
                 logger.info(f"📏 跳过超大图片，不保存为表情包 ({width}x{height})")
-                return {"success": False, "message": "图片尺寸过大，不是表情包", "classification": classification}
+                return {"success": False, "message": "图片尺寸过大，不是表情包", "classification": "photo"}
             
             # 确保文件大小适中，避免过大的文件被误分类为表情包
             if file_size_kb > 2048:  # 2MB
-                logger.info(f"💾 跳过超大文件，不保存为表情包 ({file_size_kb:.1f}KB)")
-                return {"success": False, "message": "文件大小过大，不是表情包", "classification": classification}
+                logger.info(f"� 跳过超大文件，不保存为表情包 ({file_size_kb:.1f}KB)")
+                return {"success": False, "message": "文件大小过大，不是表情包", "classification": "photo"}
             
-            # 使用大模型分析表情包
-            llm_result = await self.analyze_emoji(base64_data)
+            # 使用大模型同时进行判断和分析，减少LLM调用次数
+            is_emoji, llm_result = await _process_image_with_llm(base64_data)
             
-            # 从LLM结果中提取信息，限制最多1个情绪标签
-            emotions = llm_result.get("emotions", ["未知"])[:1]
+            # 明确的边界：只有判断为表情包的图片才被视为表情包
+            if not is_emoji:
+                classification = "photo"
+                logger.info(f"� 跳过普通照片，不保存为表情包 ({width}x{height}, {file_size_kb:.1f}KB)")
+                return {"success": False, "message": f"不是表情包 (分类: {classification})", "classification": classification}
+            
+            classification = "sticker"
+            logger.info(f"🔍 图片分类结果: {classification} ({width}x{height}, {file_size_kb:.1f}KB)")
+            
+            # 从LLM结果中提取信息，充分利用所有有价值的情绪标签
+            emotions = llm_result.get("emotions", ["未知"])
+            # 过滤掉重复和无意义的情绪标签
+            unique_emotions = []
+            for emotion in emotions:
+                if emotion and emotion != "未知" and emotion not in unique_emotions:
+                    unique_emotions.append(emotion)
+            # 如果没有有效的情绪标签，使用默认值
+            if not unique_emotions:
+                unique_emotions = ["未知"]
+            
             description = llm_result.get("description", f"用户{user_nickname}发送的表情包")
             category = llm_result.get("category", "其他")
             
@@ -176,7 +183,7 @@ class EmojiService:
             success, message, emoji_info = self.emoji_manager.add_emoji(
                 base64_data=base64_data,
                 description=description,
-                emotions=emotions,
+                emotions=unique_emotions,
                 tags=tags,
                 category=category
             )
@@ -188,7 +195,7 @@ class EmojiService:
                     "message": message,
                     "emoji_info": emoji_info,
                     "description": description,
-                    "emotions": emotions,
+                    "emotions": unique_emotions,
                     "category": category,
                     "classification": classification
                 }
@@ -200,7 +207,7 @@ class EmojiService:
             logger.error(f"❌ 处理表情包时发生错误: {e}")
             return {"success": False, "message": str(e)}
     
-    def get_emoji_for_context(self, context: Dict[str, any], count: int = 1) -> List[EmojiInfo]:
+    def get_emoji_for_context(self, context: Dict[str, Any], count: int = 1) -> List[EmojiInfo]:
         """
         根据对话上下文选择合适的表情包
         
@@ -273,7 +280,7 @@ class EmojiService:
             logger.error(f"❌ 选择表情包失败: {e}")
             return self.emoji_manager.get_random_emoji(count=count) if self.emoji_manager else []
     
-    def _extract_emotions_from_context(self, context: Dict[str, any]) -> List[str]:
+    def _extract_emotions_from_context(self, context: Dict[str, Any]) -> List[str]:
         """
         从对话上下文中提取情绪信息
         
@@ -291,7 +298,7 @@ class EmojiService:
             logger.debug(f"⚡ 上下文情绪提取缓存命中: {cache_key}")
             return self._context_emotion_cache[cache_key]
         
-        emotions = []
+        emotions: list[str] = []
         
         # 1. 从最新消息中提取情绪标签
         last_message = context.get("last_message", "")
@@ -349,7 +356,7 @@ class EmojiService:
         
         return result
     
-    def _create_context_cache_key(self, context: Dict[str, any]) -> str:
+    def _create_context_cache_key(self, context: Dict[str, Any]) -> str:
         """
         创建上下文缓存键
         

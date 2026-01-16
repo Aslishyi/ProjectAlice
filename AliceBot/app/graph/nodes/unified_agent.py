@@ -13,7 +13,7 @@ from app.core.state import AgentState
 from app.core.config import config
 from app.memory.vector_store import vector_db
 from app.memory.relation_db import relation_db
-from app.core.prompts import ALICE_CORE_PERSONA, AGENT_SYSTEM_PROMPT
+from app.core.prompts import ALICE_CORE_PERSONA, AGENT_SYSTEM_PROMPT, build_prompt_with_persona
 from app.utils.cache import cached_llm_invoke, cached_user_info_get, cached_user_info_set
 from app.plugins.emoji_plugin.emoji_service import get_emoji_service
 
@@ -437,8 +437,27 @@ async def agent_node(state: AgentState):
         insert_pos = modified_agent_prompt.find("{user_expression_habits}") + len("{user_expression_habits}")
         modified_agent_prompt = modified_agent_prompt[:insert_pos] + "\n" + expression_habits_instruction + modified_agent_prompt[insert_pos:]
     
+    # 获取情绪和关系信息
+    primary_emotion = state.get("primary_emotion", "平静")
+    intimacy = state.get("intimacy", 0)
+    familiarity = state.get("familiarity", 0)
+    
+    # 根据亲密度和熟悉度确定关系类型
+    if intimacy > 70 and familiarity > 70:
+        relation = "好朋友"
+    elif intimacy > 40 and familiarity > 40:
+        relation = "普通朋友"
+    elif intimacy > 10 and familiarity > 10:
+        relation = "熟人"
+    else:
+        relation = "陌生人"
+    
+    # 构建包含扩展人设和说话风格的完整core_persona
+    scene = "private" if "private" in str(state.get("session_id", "")) else "group"
+    complete_core_persona = await build_prompt_with_persona(ALICE_CORE_PERSONA, last_human_content, scene, primary_emotion, relation)
+    
     final_system_prompt = modified_agent_prompt.format(
-        core_persona=ALICE_CORE_PERSONA,
+        core_persona=complete_core_persona,
         time=now_str,
         current_user=f"{user_display_name} ({real_user_id})",
         vision_summary=vision_summary_text,

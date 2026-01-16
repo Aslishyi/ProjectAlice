@@ -7,7 +7,7 @@ import random
 import httpx
 import io
 from PIL import Image
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 from datetime import datetime
 
 logger = logging.getLogger("EmojiManager")
@@ -27,7 +27,7 @@ class EmojiInfo:
         self.usage_count = 0  # 使用次数
         self.last_used_at = None  # 最后使用时间
 
-    def to_dict(self) -> Dict[str, any]:
+    def to_dict(self) -> Dict[str, Any]:
         """转换为字典格式"""
         return {
             "emoji_hash": self.emoji_hash,
@@ -43,7 +43,7 @@ class EmojiInfo:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, any]) -> "EmojiInfo":
+    def from_dict(cls, data: Dict[str, Any]) -> "EmojiInfo":
         """从字典创建EmojiInfo对象"""
         emoji = cls(
             data["emoji_hash"],
@@ -740,7 +740,7 @@ class EmojiManager:
         """
         return len(self.emojis)
     
-    def get_info(self) -> Dict[str, any]:
+    def get_info(self) -> Dict[str, Any]:
         """获取表情包统计信息
         
         Returns:

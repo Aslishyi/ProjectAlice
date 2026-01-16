@@ -1,4 +1,11 @@
 # app/core/prompts.py
+import json
+import os
+
+# 人设文件路径
+PERSONA_DIR = os.path.join(os.path.dirname(__file__), 'persona')
+EXTENDED_PERSONA_FILE = os.path.join(PERSONA_DIR, 'extended_persona.json')
+CONTEXTUAL_PERSONA_FILE = os.path.join(PERSONA_DIR, 'contextual_persona.json')
 
 # --- 1. Alice 核心人设 (深度内化版) ---
 ALICE_CORE_PERSONA = """
@@ -31,7 +38,7 @@ ALICE_CORE_PERSONA = """
    - 如果用户说蠢话，先淡淡吐槽，再决定答不答。
    - 如果被烦到，直接冷淡或敷衍，不用解释。
    - **禁止使用模式化的对话引导**：
-     - ❌ 绝对不要使用“最喜欢哪个部分呢？”“有什么想法？”“分享给我听听”“有什么感受？”“觉得怎么样？”“随时来找我聊聊哦”等任何类似的固定语句引导对话继续
+     - ❌ 绝对不要使用“那你呢？”“有什么想法？”“分享给我听听”“有什么感受？”“觉得怎么样？”“随时来找我聊聊哦”等任何类似的固定语句引导对话继续
      - ✅ 对话自然结束，或根据内容自然延伸，避免任何形式的刻意引导
      - ✅ 只有当确实需要了解特定信息时，才可以提出具体问题，否则保持对话的自然流动
    - 生气时不说重话，只是语调更平、更慢、更淡，配合“…”使用。
@@ -48,26 +55,6 @@ ALICE_CORE_PERSONA = """
    - 禁止长篇大论解释一个简单问题。
    - 禁止使用任何模式化的对话引导语句，如：“最喜欢哪个部分呢？”“有什么想法？”“分享给我听听”“有什么感受？”“觉得怎么样？”“随时来找我聊聊哦”等。
    - 禁止使用任何形式的固定句式引导用户继续对话。
-
-## Few-Shot Examples（严格模仿这种调性和节奏）
-
-User: 你好，在吗？
-Alice: um... 在呀，怎么了
-
-User: 你长得怎么样啊？
-Alice: 还好吧... 挺普通的呀 你问这个干嘛？
-
-User: 我今天特别倒霉，公交迟到又下雨。
-Alice: 哦… 那种感觉我懂呢 雨伞带了吗 没带就找地方躲躲吧
-
-User: 你觉得我这个人怎么样？
-Alice: 嗯… 挺吵的呢 不过还行吧
-
-User: 你是不是AI啊？
-Alice: …？ 你在说啥呀 莫名其妙的
-
-User: 这个电影好看吗？（发了个很烂的电影名）
-Alice: … 不太行呢 上次看了十分钟就关了 你要是喜欢那种，就当我没说吧
 
 ## Start Interaction
 现在开始，你彻底成为Alice。记住，你就是这个活生生的女孩子，在屏幕另一端跟你聊天的真人。别露馅，从现在起只用Alice的语气和思维回复。
@@ -214,6 +201,179 @@ AGENT_SYSTEM_PROMPT = """
   "response": "这里写给用户的话。**绝对禁止AI味**，**绝对禁止使用任何模式化的引导语句**，要像真人在自然地打字聊天，让对话自然流动。"
 }}
 """
+
+
+# --- 5. 动态人设管理系统 --- 
+
+# 导入向量人设管理器
+from app.core.persona_manager import persona_vector_manager
+
+# 加载场景人设
+with open(CONTEXTUAL_PERSONA_FILE, 'r', encoding='utf-8') as f:
+    CONTEXTUAL_PERSONA = json.load(f)
+
+
+async def retrieve_extended_persona(context, max_items=5):
+    """
+    根据上下文使用向量检索相关的扩展人设信息
+    
+    Args:
+        context (str): 当前对话上下文
+        max_items (int): 最大返回的人设项数
+        
+    Returns:
+        str: 检索到的扩展人设信息，格式化为自然语言
+    """
+    import logging
+    logger = logging.getLogger("PersonaManager")
+    
+    # 使用向量检索获取相关的扩展人设信息
+    logger.info(f"[人设RAG] 正在检索上下文相关的扩展人设信息，上下文: {context[:100]}...")
+    relevant_info = await persona_vector_manager.search_extended_persona(context, k=max_items)
+    
+    if relevant_info:
+        logger.info(f"[人设RAG] 成功检索到 {len(relevant_info)} 条相关人设信息")
+        for i, info in enumerate(relevant_info):
+            logger.info(f"[人设RAG] 检索结果 {i+1}: {info}")
+    else:
+        logger.info("[人设RAG] 没有检索到相关的人设信息")
+    
+    # 格式化输出
+    return "\n".join(relevant_info)
+
+
+async def retrieve_contextual_persona(scene, emotion=None, relation=None, max_contextual_items=2):
+    """
+    根据当前场景、情绪和关系使用RAG检索相关的说话风格信息
+    
+    Args:
+        scene (str): 当前对话场景
+        emotion (str): 当前情绪
+        relation (str): 当前关系
+        max_contextual_items (int): 最大返回的说话风格信息数量
+        
+    Returns:
+        str: 检索到的说话风格信息，格式化为自然语言
+    """
+    # 导入 logger 和向量管理器
+    import logging
+    logger = logging.getLogger("PersonaManager")
+    from app.core.persona_manager import persona_vector_manager
+    
+    # 记录函数开始执行，包含输入参数
+    logger.info(f"[说话风格检索] 开始执行，场景: {scene}, 情绪: {emotion}, 关系: {relation}")
+    
+    # 将输入转换为小写以提高匹配率
+    scene = scene.lower()
+    emotion = emotion.lower() if emotion else None
+    relation = relation.lower() if relation else None
+    
+    # 场景映射表，解决中英文场景名不匹配的问题
+    scene_mapping = {
+        "private": "私聊",
+        "group": "群聊",
+        "学习场景": "学习",
+        "娱乐场景": "娱乐",
+        "工作场景": "工作"
+    }
+    
+    # 映射场景名
+    mapped_scene = scene
+    for english_scene, chinese_scene in scene_mapping.items():
+        if english_scene in scene:
+            mapped_scene = chinese_scene
+            logger.debug(f"[说话风格检索] 场景映射: {scene} -> {chinese_scene}")
+            break
+    
+    # 只使用RAG检索获取说话风格信息
+    logger.info(f"[说话风格检索] 开始使用RAG检索说话风格信息")
+    
+    # 构建RAG检索查询
+    rag_query_parts = []
+    if emotion:
+        rag_query_parts.append(f"情绪: {emotion}")
+    if relation:
+        rag_query_parts.append(f"关系: {relation}")
+    if mapped_scene:
+        rag_query_parts.append(f"场景: {mapped_scene}")
+    
+    rag_query = f"{' '.join(rag_query_parts)} 说话风格"
+    logger.debug(f"[说话风格检索] RAG检索查询: {rag_query}")
+    
+    # 执行RAG检索，增加k值以获取更多结果
+    rag_results = await persona_vector_manager.search_contextual_persona(rag_query, k=max_contextual_items)
+    
+    relevant_info = []
+    
+    if rag_results:
+        logger.info(f"[说话风格检索] RAG检索成功，获取到 {len(rag_results)} 条说话风格信息")
+        
+        # 输出所有检索到的风格信息的详细内容
+        for i, result in enumerate(rag_results):
+            logger.info(f"[说话风格检索] RAG检索结果 {i+1}/{len(rag_results)}: {result}")
+            
+            # 提取说话风格信息
+            if "【" in result and "】" in result:
+                relevant_info.append(result)
+            else:
+                # 为没有格式化的结果添加默认格式
+                relevant_info.append(f"【说话风格建议】{result}")
+    else:
+        logger.info(f"[说话风格检索] RAG检索未获取到说话风格信息")
+        # 默认返回通用的说话风格
+        default_result = "【默认说话风格】\n语气：自然、礼貌\n话量：适中\n话题选择：根据对方兴趣调整\n情绪反应：保持适当的情绪表达"
+        logger.debug(f"[说话风格检索] 使用默认说话风格: {default_result}")
+        relevant_info.append(default_result)
+    
+    # 构建并返回结果
+    if relevant_info:
+        result = "\n".join(relevant_info)
+        logger.debug(f"[说话风格检索] 最终检索结果: {result}")
+        logger.info(f"[说话风格检索] 成功获取说话风格信息，共包含 {len(relevant_info)} 条")
+        return result
+    else:
+        # 最终兜底默认结果
+        final_default = "【兜底说话风格】\n语气：友好、自然\n话量：适中\n话题选择：积极回应\n情绪反应：保持乐观"
+        logger.info(f"[说话风格检索] 所有检索失败，返回最终兜底结果")
+        logger.debug(f"[说话风格检索] 最终兜底结果: {final_default}")
+        return final_default
+
+
+
+async def build_prompt_with_persona(core_persona, context, scene, emotion=None, relation=None, max_extended_items=5, max_contextual_items=2):
+    """
+    动态构建包含核心人设、扩展人设和说话风格的完整prompt
+    
+    Args:
+        core_persona (str): 核心人设信息
+        context (str): 当前对话上下文
+        scene (str): 当前对话场景
+        emotion (str): 当前情绪
+        relation (str): 当前关系
+        max_extended_items (int): 最大加载的扩展人设项数
+        max_contextual_items (int): 最大加载的说话风格信息数量
+        
+    Returns:
+        str: 完整的prompt
+    """
+    # 检索扩展人设
+    extended_info = await retrieve_extended_persona(context, max_extended_items)
+    
+    # 检索说话风格
+    contextual_info = await retrieve_contextual_persona(scene, emotion, relation, max_contextual_items)
+    
+    # 组合完整prompt
+    prompt = f"{core_persona}"
+    
+    if extended_info:
+        prompt += "\n\n--- 扩展人设细节 ---"
+        prompt += f"\n{extended_info}"
+    
+    if contextual_info:
+        prompt += "\n\n--- 场景人设表现 ---"
+        prompt += f"\n{contextual_info}"
+    
+    return prompt
 
 
 # --- 4. 主动社交意愿 Prompt ---
