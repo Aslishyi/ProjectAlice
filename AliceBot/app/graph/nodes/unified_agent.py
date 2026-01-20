@@ -13,6 +13,7 @@ from app.core.state import AgentState
 from app.core.config import config
 from app.memory.vector_store import vector_db
 from app.memory.relation_db import relation_db
+from app.memory import memory_manager
 from app.core.prompts import ALICE_CORE_PERSONA, AGENT_SYSTEM_PROMPT, build_prompt_with_persona
 from app.utils.cache import cached_llm_invoke, cached_user_info_get, cached_user_info_set
 from app.plugins.emoji_plugin.emoji_service import get_emoji_service
@@ -229,10 +230,9 @@ async def agent_node(state: AgentState):
         query_text = re.sub(r"【表情包:.*?】", "", query_text)
         query_text = query_text.replace("[图片]", "").strip()
         if len(query_text) > 4:
-            from app.memory.combined_memory import CombinedMemoryManager
+
             
-            # 初始化记忆管理器
-            memory_manager = CombinedMemoryManager()
+            # 使用全局记忆管理器实例
             
             # 构建聊天历史字符串
             chat_history_str = ""
@@ -255,23 +255,10 @@ async def agent_node(state: AgentState):
                 logger.info(f"[{ts}] 📖 [Smart RAG] Retrieved memory content: {retrieval_result['memory_content']}")
                 memory_context = f"【相关回忆】\n" + retrieval_result["memory_content"]
             else:
-                # 如果智能记忆检索失败，回退到传统RAG检索
-                logger.info(f"[{ts}] 📖 [Fallback RAG] Using traditional retrieval")
-                docs = await vector_db.search(query_text, k=3)
-                logger.info(f"[{ts}] 📖 [Fallback RAG] Retrieved {len(docs) if docs else 0} documents")
-                if docs:
-                    logger.info(f"[{ts}] 📖 [Fallback RAG] Raw documents: {docs}")
-                    # 过滤检索结果中的表情包信息
-                    filtered_docs = []
-                    for doc in docs:
-                        # 移除检索结果中的表情包描述
-                        filtered_doc = re.sub(r"【表情包:.*?】", "", doc)
-                        if filtered_doc.strip():
-                            filtered_docs.append(filtered_doc.strip())
-                    logger.info(f"[{ts}] 📖 [Fallback RAG] Filtered to {len(filtered_docs)} documents")
-                    if filtered_docs:
-                        logger.info(f"[{ts}] 📖 [Fallback RAG] Final filtered documents: {filtered_docs}")
-                        memory_context = f"【相关回忆】\n" + "\n".join(filtered_docs)
+                logger.info(f"[{ts}] 📖 [Smart RAG] No relevant memories found, skipping Fallback RAG to reduce API calls")
+                # 优化：不再回退到传统RAG检索，减少API调用次数
+                # 这样可以避免额外的3次API调用（智能记忆检索已经使用了综合查询）
+                memory_context = ""
     except Exception as e:
         logger.error(f"[{ts}] [Smart RAG Error] {e}")
         # 异常情况下回退到传统RAG检索
@@ -539,10 +526,66 @@ async def agent_node(state: AgentState):
         # 自动判断对话类型
         conversation_type = "group" if "group" in str(state.get("session_id", "")) else "private"
         
+        # 根据情绪调整LLM参数，让回复更符合当前情绪
+        # 提取当前情绪
+        current_emotion = primary_emotion
+        
+        # 根据情绪调整温度参数
+        # 情绪越强烈，温度越高，回复越有变化；情绪越平静，温度越低，回复越稳定
+        emotion_to_temperature = {
+            "兴高采烈": 0.9,
+            "开心": 0.8,
+            "愉快": 0.7,
+            "惬意": 0.6,
+            "放松": 0.5,
+            "平静": 0.4,
+            "困倦/发呆": 0.3,
+            "恍惚": 0.3,
+            "低落": 0.5,
+            "沮丧": 0.6,
+            "烦躁": 0.7,
+            "愤怒": 0.8,
+            "暴怒": 0.9,
+            "疲惫": 0.3,
+            "疲惫不堪": 0.2,
+            "压力山大": 0.7,
+            "焦虑不安": 0.8
+        }
+        
+        # 获取情绪对应的温度，默认使用原来的温度
+        adjusted_temperature = emotion_to_temperature.get(current_emotion, llm.temperature)
+        
+        # 根据疲劳和压力调整回复长度倾向
+        # 越疲惫/压力越大，越倾向于短回复
+        response_length_factor = 1.0
+        if fatigue > 0.7:
+            response_length_factor = 0.5  # 非常疲惫，回复很短
+        elif fatigue > 0.4:
+            response_length_factor = 0.8  # 比较疲惫，回复较短
+        
+        if stress > 0.7:
+            response_length_factor *= 0.8  # 非常压力大，回复更短
+        elif stress > 0.4:
+            response_length_factor *= 0.9  # 有压力，回复稍短
+        
+        # 向系统提示添加回复长度要求
+        response_length_instruction = ""
+        if response_length_factor < 0.6:
+            response_length_instruction = "\n\n### 回复长度要求 (CRITICAL)\n由于你现在非常疲惫/压力大，请使用**极其简短**的回复，尽量控制在10字以内，只说必要的话。"
+        elif response_length_factor < 0.9:
+            response_length_instruction = "\n\n### 回复长度要求 (IMPORTANT)\n由于你现在有点疲惫/压力，请使用**简短**的回复，控制在20字以内。"
+        
+        # 添加到最后一个系统消息中
+        if response_length_instruction:
+            for i, msg in enumerate(input_messages):
+                if isinstance(msg, SystemMessage):
+                    input_messages[i] = SystemMessage(content=msg.content + response_length_instruction)
+                    break
+        
         response = await cached_llm_invoke(
             llm, 
             input_messages, 
-            temperature=llm.temperature,
+            temperature=adjusted_temperature,
             conversation_type=conversation_type
         )
         # 处理response可能是字符串的情况
@@ -758,6 +801,20 @@ async def agent_node(state: AgentState):
     
     # 构造返回
     ai_msg = AIMessage(content=parsed.get("response", "..."))
+    
+    # 保存对话历史到记忆中
+    if last_human_content and parsed.get("response"):
+        try:
+            await memory_manager.update_memory(
+                user_input=last_human_content,
+                ai_response=parsed.get("response"),
+                user_id=real_user_id,
+                user_name=user_display_name
+            )
+            logger.info(f"[{ts}] 📝 [Memory] Saved conversation to memory")
+        except Exception as e:
+            logger.error(f"[{ts}] ❌ [Memory] Failed to save conversation: {e}")
+    
     # 根据是否需要调用工具设置next_step
     action = parsed.get("action", "reply")
     next_step = "tool" if action in ["web_search", "generate_image", "run_python_analysis"] else "save"

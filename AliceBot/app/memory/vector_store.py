@@ -21,8 +21,37 @@ class VectorMemory(VectorStore):
     """
     
     def __init__(self):
-        # 1. 初始化 ChromaDB
-        self.client = chromadb.PersistentClient(path=config.VECTOR_DB_PATH)
+        # 1. 检查并创建向量数据库目录
+        import os
+        import tempfile
+        db_path = config.VECTOR_DB_PATH
+        
+        # 创建目录（如果不存在）
+        if not os.path.exists(db_path):
+            try:
+                os.makedirs(db_path, exist_ok=True)
+                logger.info(f"[VectorStore] Created vector database directory: {db_path}")
+            except OSError as e:
+                logger.error(f"[VectorStore] Failed to create vector database directory: {e}")
+                raise
+        
+        # 检查目录是否可写
+        try:
+            with tempfile.NamedTemporaryFile(dir=db_path, delete=True):
+                pass
+            logger.info(f"[VectorStore] Vector database directory is writable: {db_path}")
+        except OSError as e:
+            logger.error(f"[VectorStore] Vector database directory is not writable: {e}")
+            logger.error(f"[VectorStore] Please check directory permissions and ensure no other process is locking the database")
+            raise
+        
+        # 2. 初始化 ChromaDB，禁用遥测并确保可写
+        self.client = chromadb.PersistentClient(
+            path=db_path,
+            settings=chromadb.config.Settings(
+                anonymized_telemetry=False
+            )
+        )
         self._lock = threading.Lock()  # 初始化互斥锁
 
         # 2. 初始化异步 OpenAI 客户端

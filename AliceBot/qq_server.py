@@ -1093,18 +1093,28 @@ if __name__ == "__main__":
     parser.add_argument("--workers", type=int, default=1, help="工作进程数，默认根据CPU核心数自动调整")
     args = parser.parse_args()
     
+    # 验证主机地址，确保使用有效的IP或0.0.0.0
+    import socket
+    valid_host = args.host
+    try:
+        # 尝试解析主机名或验证IP地址
+        socket.getaddrinfo(valid_host, args.port)
+    except socket.gaierror:
+        logger.warning(f"⚠️  无效的主机地址: {valid_host}，将使用默认值 0.0.0.0")
+        valid_host = "0.0.0.0"
+    
     # 启用多进程模式，利用多核CPU提高性能
     if args.workers is None:
         import os
         args.workers = os.cpu_count()  # 默认使用所有CPU核心
-    
+
     logger.info(f"🚀 启动ProjectAlice服务器 [多进程模式，工作进程数: {args.workers}]")
-    logger.info(f"📡 监听地址: http://{args.host}:{args.port}")
+    logger.info(f"📡 监听地址: http://{valid_host}:{args.port}")
     
     # 启动Uvicorn服务器
     uvicorn.run(
         "qq_server:app",
-        host=args.host,
+        host=valid_host,
         port=args.port,
         workers=args.workers,
         log_level="info"

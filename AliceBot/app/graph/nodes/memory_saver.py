@@ -58,16 +58,22 @@ llm = ChatOpenAI(
 logger = logging.getLogger("MemorySaver")
 
 
-async def memory_saver_node(state: AgentState):
+async def extract_and_save_memories(messages: list, real_user_id: str, user_nickname: str):
+    """
+    从对话消息中提取重要信息并保存到长期记忆
+    
+    Args:
+        messages: 对话消息列表
+        real_user_id: 真实用户ID
+        user_nickname: 用户昵称
+        
+    Returns:
+        dict: 包含提取的记忆信息的字典
+    """
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    msgs = state.get("messages", [])
-    if not msgs: return {}
+    if not messages: return {"extracted_count": 0, "saved_count": 0}
 
-    # 修改点：强制使用 sender_qq
-    real_user_id = state.get("sender_qq", "unknown")
-    user_nickname = state.get("sender_name", "User")
-
-    last_msg = msgs[-1]
+    last_msg = messages[-1]
     ai_output = "N/A (AI remained silent)"
     mode = "OBSERVATION"
     user_text = ""
@@ -75,10 +81,10 @@ async def memory_saver_node(state: AgentState):
     if last_msg.type == 'ai':
         mode = "INTERACTIVE"
         ai_output = last_msg.content
-        if len(msgs) >= 2:
-            user_text = msgs[-2].content
+        if len(messages) >= 2:
+            user_text = messages[-2].content
         else:
-            return {}
+            return {"extracted_count": 0, "saved_count": 0}
     else:
         mode = "OBSERVATION"
         user_text = last_msg.content
@@ -168,7 +174,32 @@ async def memory_saver_node(state: AgentState):
             except Exception as e:
                 logger.error(f"[{ts}] ❌ [CombinedMemory] Failed to update: {e}")
 
+        return {
+            "extracted_count": len(operations),
+            "saved_count": len(facts_to_add)
+        }
+
     except Exception as e:
         logger.error(f"[{ts}] ❌ [Memory Error] {e}")
+        return {"extracted_count": 0, "saved_count": 0}
 
+
+async def memory_saver_node(state: AgentState):
+    """
+    记忆保存节点 - 从对话中提取重要信息并存储到向量数据库
+    
+    Args:
+        state: 代理状态
+        
+    Returns:
+        dict: 空字典
+    """
+    msgs = state.get("messages", [])
+    
+    # 修改点：强制使用 sender_qq
+    real_user_id = state.get("sender_qq", "unknown")
+    user_nickname = state.get("sender_name", "User")
+    
+    await extract_and_save_memories(msgs, real_user_id, user_nickname)
+    
     return {}

@@ -30,8 +30,13 @@ class PersonaVectorManager:
         import threading
         from app.core.config import config
         
-        # 创建单独的客户端，使用与主向量数据库相同的路径
-        self.client = chromadb.PersistentClient(path=config.VECTOR_DB_PATH)
+        # 创建单独的客户端，使用与主向量数据库相同的路径和设置
+        self.client = chromadb.PersistentClient(
+            path=config.VECTOR_DB_PATH,
+            settings=chromadb.config.Settings(
+                anonymized_telemetry=False
+            )
+        )
         
         # 创建或获取扩展人设专用集合
         self.extended_collection = self.client.get_or_create_collection(

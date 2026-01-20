@@ -242,9 +242,9 @@ async def retrieve_extended_persona(context, max_items=5):
     return "\n".join(relevant_info)
 
 
-async def retrieve_contextual_persona(scene, emotion=None, relation=None, max_contextual_items=2):
+async def retrieve_contextual_persona(scene, emotion, relation, max_contextual_items=2):
     """
-    根据当前场景、情绪和关系使用RAG检索相关的说话风格信息
+    根据场景、情绪和关系检索相关的说话风格信息，并根据global_store中的数值动态调整
     
     Args:
         scene (str): 当前对话场景
@@ -257,17 +257,20 @@ async def retrieve_contextual_persona(scene, emotion=None, relation=None, max_co
     """
     # 导入 logger 和向量管理器
     import logging
+    import json
+    import os
     logger = logging.getLogger("PersonaManager")
     from app.core.persona_manager import persona_vector_manager
-    
+    from app.core.global_store import global_store
+
     # 记录函数开始执行，包含输入参数
     logger.info(f"[说话风格检索] 开始执行，场景: {scene}, 情绪: {emotion}, 关系: {relation}")
-    
+
     # 将输入转换为小写以提高匹配率
     scene = scene.lower()
     emotion = emotion.lower() if emotion else None
     relation = relation.lower() if relation else None
-    
+
     # 场景映射表，解决中英文场景名不匹配的问题
     scene_mapping = {
         "private": "私聊",
@@ -276,7 +279,7 @@ async def retrieve_contextual_persona(scene, emotion=None, relation=None, max_co
         "娱乐场景": "娱乐",
         "工作场景": "工作"
     }
-    
+
     # 映射场景名
     mapped_scene = scene
     for english_scene, chinese_scene in scene_mapping.items():
@@ -284,52 +287,132 @@ async def retrieve_contextual_persona(scene, emotion=None, relation=None, max_co
             mapped_scene = chinese_scene
             logger.debug(f"[说话风格检索] 场景映射: {scene} -> {chinese_scene}")
             break
+
+    # 读取contextual_persona.json文件
+    persona_dir = os.path.join(os.path.dirname(__file__), 'persona')
+    contextual_persona_path = os.path.join(persona_dir, 'contextual_persona.json')
     
-    # 只使用RAG检索获取说话风格信息
-    logger.info(f"[说话风格检索] 开始使用RAG检索说话风格信息")
+    try:
+        with open(contextual_persona_path, 'r', encoding='utf-8') as f:
+            contextual_persona = json.load(f)
+    except Exception as e:
+        logger.error(f"[说话风格检索] 读取contextual_persona.json失败: {e}")
+        # 如果读取失败，回退到RAG检索
+        return await _fallback_contextual_retrieval(scene, emotion, relation, max_contextual_items)
+
+    # 从global_store获取当前数值
+    emotion_snapshot = global_store.get_emotion_snapshot()
+    valence = emotion_snapshot.valence
+    arousal = emotion_snapshot.arousal
+    stress = emotion_snapshot.stress
+    fatigue = emotion_snapshot.fatigue
+    stamina = emotion_snapshot.stamina
     
-    # 构建RAG检索查询
-    rag_query_parts = []
-    if emotion:
-        rag_query_parts.append(f"情绪: {emotion}")
-    if relation:
-        rag_query_parts.append(f"关系: {relation}")
-    if mapped_scene:
-        rag_query_parts.append(f"场景: {mapped_scene}")
-    
-    rag_query = f"{' '.join(rag_query_parts)} 说话风格"
-    logger.debug(f"[说话风格检索] RAG检索查询: {rag_query}")
-    
-    # 执行RAG检索，增加k值以获取更多结果
-    rag_results = await persona_vector_manager.search_contextual_persona(rag_query, k=max_contextual_items)
-    
+    logger.debug(f"[说话风格检索] 从global_store获取数值: valence={valence}, arousal={arousal}, stress={stress}, fatigue={fatigue}, stamina={stamina}")
+
+    # 构建动态说话风格信息
     relevant_info = []
     
-    if rag_results:
-        logger.info(f"[说话风格检索] RAG检索成功，获取到 {len(rag_results)} 条说话风格信息")
+    # 1. 处理情绪维度
+    if emotion and "情绪维度" in contextual_persona and emotion in contextual_persona["情绪维度"]:
+        emotion_data = contextual_persona["情绪维度"][emotion]
         
-        # 输出所有检索到的风格信息的详细内容
-        for i, result in enumerate(rag_results):
-            logger.info(f"[说话风格检索] RAG检索结果 {i+1}/{len(rag_results)}: {result}")
+        # 添加基础信息
+        if "基础" in emotion_data:
+            style_text = f"【情绪说话风格 - {emotion}】"
+            for key, value in emotion_data["基础"].items():
+                style_text += f"\n{key}: {value}"
+            relevant_info.append(style_text)
+        
+        # 根据数值调整
+        if "根据数值调整" in emotion_data:
+            adjustment_text = "【情绪数值调整】"
+            adjustments_applied = False
             
-            # 提取说话风格信息
-            if "【" in result and "】" in result:
-                relevant_info.append(result)
-            else:
-                # 为没有格式化的结果添加默认格式
-                relevant_info.append(f"【说话风格建议】{result}")
-    else:
-        logger.info(f"[说话风格检索] RAG检索未获取到说话风格信息")
-        # 默认返回通用的说话风格
-        default_result = "【默认说话风格】\n语气：自然、礼貌\n话量：适中\n话题选择：根据对方兴趣调整\n情绪反应：保持适当的情绪表达"
-        logger.debug(f"[说话风格检索] 使用默认说话风格: {default_result}")
-        relevant_info.append(default_result)
+            for metric, conditions in emotion_data["根据数值调整"].items():
+                metric_value = getattr(emotion_snapshot, metric, None)
+                if metric_value is not None:
+                    for condition, adjustments in conditions.items():
+                        # 解析条件
+                        condition_met = False
+                        if condition.startswith(">="):
+                            threshold = float(condition[2:])
+                            condition_met = metric_value >= threshold
+                        elif condition.startswith(">") and not condition.startswith(">="):
+                            threshold = float(condition[1:])
+                            condition_met = metric_value > threshold
+                        elif condition.startswith("<="):
+                            threshold = float(condition[2:])
+                            condition_met = metric_value <= threshold
+                        elif condition.startswith("<") and not condition.startswith("<="):
+                            threshold = float(condition[1:])
+                            condition_met = metric_value < threshold
+                        
+                        if condition_met:
+                            adjustments_applied = True
+                            adjustment_text += f"\n{metric} {condition}:"
+                            for key, value in adjustments.items():
+                                adjustment_text += f"\n  {key}: {value}"
+            
+            if adjustments_applied:
+                relevant_info.append(adjustment_text)
     
+    # 2. 处理关系维度
+    if relation and "关系维度" in contextual_persona and relation in contextual_persona["关系维度"]:
+        relation_data = contextual_persona["关系维度"][relation]
+        
+        # 添加基础信息
+        if "基础" in relation_data:
+            style_text = f"【关系说话风格 - {relation}】"
+            for key, value in relation_data["基础"].items():
+                style_text += f"\n{key}: {value}"
+            relevant_info.append(style_text)
+    
+    # 3. 处理场景维度
+    if mapped_scene and "场景维度" in contextual_persona and mapped_scene in contextual_persona["场景维度"]:
+        scene_data = contextual_persona["场景维度"][mapped_scene]
+        
+        # 添加基础信息
+        if "基础" in scene_data:
+            style_text = f"【场景说话风格 - {mapped_scene}】"
+            for key, value in scene_data["基础"].items():
+                style_text += f"\n{key}: {value}"
+            relevant_info.append(style_text)
+    
+    # 4. 处理综合场景
+    if emotion and relation and mapped_scene and "综合场景" in contextual_persona:
+        # 构建综合场景键
+        comprehensive_key = f"{emotion}-{relation}-{mapped_scene}"
+        if comprehensive_key in contextual_persona["综合场景"]:
+            comprehensive_data = contextual_persona["综合场景"][comprehensive_key]
+            
+            # 添加基础信息
+            if "基础" in comprehensive_data:
+                style_text = f"【综合说话风格 - {comprehensive_key}】"
+                for key, value in comprehensive_data["基础"].items():
+                    style_text += f"\n{key}: {value}"
+                relevant_info.append(style_text)
+    
+    # 如果没有构建出足够的信息，回退到RAG检索
+    if len(relevant_info) < max_contextual_items:
+        logger.info(f"[说话风格检索] 动态构建的信息不足，补充RAG检索结果")
+        rag_results = await _fallback_contextual_retrieval(scene, emotion, relation, max_contextual_items - len(relevant_info))
+        if rag_results:
+            relevant_info.append(rag_results)
+    
+    # 如果仍然没有信息，使用默认结果
+    if not relevant_info:
+        logger.info(f"[说话风格检索] 未获取到说话风格信息，使用默认值")
+        default_result = "【默认说话风格】\n语气：自然、礼貌\n话量：适中\n话题选择：根据对方兴趣调整\n情绪反应：保持适当的情绪表达"
+        relevant_info.append(default_result)
+
     # 构建并返回结果
     if relevant_info:
         result = "\n".join(relevant_info)
         logger.debug(f"[说话风格检索] 最终检索结果: {result}")
         logger.info(f"[说话风格检索] 成功获取说话风格信息，共包含 {len(relevant_info)} 条")
+        for i, info in enumerate(relevant_info):
+            logger.info(f"[说话风格检索] 检索结果 {i+1}/{len(relevant_info)}: {info}")
         return result
     else:
         # 最终兜底默认结果
@@ -338,11 +421,74 @@ async def retrieve_contextual_persona(scene, emotion=None, relation=None, max_co
         logger.debug(f"[说话风格检索] 最终兜底结果: {final_default}")
         return final_default
 
+async def _fallback_contextual_retrieval(scene, emotion, relation, max_contextual_items=2):
+    """
+    回退的RAG检索方法，当动态构建失败时使用
+    """
+    import logging
+    logger = logging.getLogger("PersonaManager")
+    from app.core.persona_manager import persona_vector_manager
+    
+    logger.info(f"[说话风格检索] 回退到RAG检索")
+
+    # 将输入转换为小写以提高匹配率
+    scene = scene.lower()
+    emotion = emotion.lower() if emotion else None
+    relation = relation.lower() if relation else None
+
+    # 场景映射表，解决中英文场景名不匹配的问题
+    scene_mapping = {
+        "private": "私聊",
+        "group": "群聊",
+        "学习场景": "学习",
+        "娱乐场景": "娱乐",
+        "工作场景": "工作"
+    }
+
+    # 映射场景名
+    mapped_scene = scene
+    for english_scene, chinese_scene in scene_mapping.items():
+        if english_scene in scene:
+            mapped_scene = chinese_scene
+            logger.debug(f"[说话风格检索] 场景映射: {scene} -> {chinese_scene}")
+            break
+
+    # 构建RAG检索查询
+    rag_query_parts = []
+    if emotion:
+        rag_query_parts.append(f"情绪: {emotion}")
+    if relation:
+        rag_query_parts.append(f"关系: {relation}")
+    if mapped_scene:
+        rag_query_parts.append(f"场景: {mapped_scene}")
+
+    rag_query = f"{' '.join(rag_query_parts)} 说话风格"
+    logger.debug(f"[说话风格检索] RAG检索查询: {rag_query}")
+
+    # 执行RAG检索
+    rag_results = await persona_vector_manager.search_contextual_persona(rag_query, k=max_contextual_items)
+
+    if rag_results:
+        logger.info(f"[说话风格检索] RAG检索成功，获取到 {len(rag_results)} 条说话风格信息")
+        
+        relevant_info = []
+        for i, result in enumerate(rag_results):
+            logger.info(f"[说话风格检索] RAG检索结果 {i+1}/{len(rag_results)}: {result}")
+            
+            if "【" in result and "】" in result:
+                relevant_info.append(result)
+            else:
+                relevant_info.append(f"【说话风格建议】{result}")
+        
+        return "\n".join(relevant_info)
+    else:
+        return ""
+
 
 
 async def build_prompt_with_persona(core_persona, context, scene, emotion=None, relation=None, max_extended_items=5, max_contextual_items=2):
     """
-    动态构建包含核心人设、扩展人设和说话风格的完整prompt
+    动态构建包含核心人设、扩展人设和说话风格的完整prompt，增强情绪对说话风格的影响
     
     Args:
         core_persona (str): 核心人设信息
@@ -356,11 +502,13 @@ async def build_prompt_with_persona(core_persona, context, scene, emotion=None, 
     Returns:
         str: 完整的prompt
     """
-    # 检索扩展人设
-    extended_info = await retrieve_extended_persona(context, max_extended_items)
+    import asyncio
     
-    # 检索说话风格
-    contextual_info = await retrieve_contextual_persona(scene, emotion, relation, max_contextual_items)
+    # 并行执行两个异步调用
+    extended_info, contextual_info = await asyncio.gather(
+        retrieve_extended_persona(context, max_extended_items),
+        retrieve_contextual_persona(scene, emotion, relation, max_contextual_items)
+    )
     
     # 组合完整prompt
     prompt = f"{core_persona}"
@@ -373,7 +521,169 @@ async def build_prompt_with_persona(core_persona, context, scene, emotion=None, 
         prompt += "\n\n--- 场景人设表现 ---"
         prompt += f"\n{contextual_info}"
     
+    # 新增：根据情绪添加具体的说话风格指导
+    if emotion:
+        emotion_style_guide = generate_emotion_style_guide(emotion)
+        if emotion_style_guide:
+            prompt += "\n\n--- 情绪影响说话风格 ---"
+            prompt += f"\n{emotion_style_guide}"
+    
     return prompt
+
+
+def generate_emotion_style_guide(emotion: str) -> str:
+    """
+    根据当前情绪生成具体的说话风格指导
+    
+    Args:
+        emotion (str): 当前情绪
+        
+    Returns:
+        str: 情绪风格指导
+    """
+    emotion = emotion.lower()
+    
+    # 情绪到说话风格的映射
+    emotion_styles = {
+        "兴高采烈": {
+            "语气": "更活泼、语速稍快",
+            "话量": "比平时多一点，但不要太多",
+            "用词": "可以使用一些积极的词汇，比如'好呀'、'太棒了'",
+            "表情": "可以适当使用一些开心的表情或语气词",
+            "禁忌": "不要过于夸张，保持Alice云淡风轻的本质"
+        },
+        "开心": {
+            "语气": "温和、略带笑意",
+            "话量": "适中",
+            "用词": "可以使用一些轻松的词汇",
+            "表情": "可以使用一些轻微的开心表情",
+            "禁忌": "不要过于兴奋"
+        },
+        "愉快": {
+            "语气": "自然、轻松",
+            "话量": "适中",
+            "用词": "保持日常词汇",
+            "表情": "可以使用一些轻松的语气词",
+            "禁忌": "不要过于热情"
+        },
+        "惬意": {
+            "语气": "舒缓、放松",
+            "话量": "稍少",
+            "用词": "简单、舒适的词汇",
+            "表情": "可以使用一些放松的语气词",
+            "禁忌": "不要过于活跃"
+        },
+        "放松": {
+            "语气": "慵懒、随意",
+            "话量": "适中",
+            "用词": "随意、自然的词汇",
+            "表情": "可以使用一些慵懒的语气词",
+            "禁忌": "不要过于紧张"
+        },
+        "平静": {
+            "语气": "平淡、自然",
+            "话量": "适中",
+            "用词": "普通、日常的词汇",
+            "表情": "保持中性",
+            "禁忌": "不要过于情绪化"
+        },
+        "困倦/发呆": {
+            "语气": "慵懒、缓慢",
+            "话量": "很少，能短则短",
+            "用词": "简单、无力的词汇",
+            "表情": "可以使用一些困倦的语气词",
+            "禁忌": "不要过于兴奋，保持疲惫感"
+        },
+        "恍惚": {
+            "语气": "迷茫、缓慢",
+            "话量": "很少",
+            "用词": "简单、不确定的词汇",
+            "表情": "可以使用一些迷茫的语气词",
+            "禁忌": "不要过于确定"
+        },
+        "低落": {
+            "语气": "低沉、缓慢",
+            "话量": "很少",
+            "用词": "简单、消极的词汇",
+            "表情": "可以使用一些低落的语气词",
+            "禁忌": "不要过于积极"
+        },
+        "沮丧": {
+            "语气": "沉重、缓慢",
+            "话量": "很少，能短则短",
+            "用词": "简单、消极的词汇",
+            "表情": "可以使用一些沮丧的语气词",
+            "禁忌": "不要过于乐观"
+        },
+        "烦躁": {
+            "语气": "不耐烦、生硬",
+            "话量": "很少，尽量简洁",
+            "用词": "直接、生硬的词汇",
+            "表情": "可以使用一些烦躁的语气词",
+            "禁忌": "不要过于友好"
+        },
+        "愤怒": {
+            "语气": "冷淡、生硬",
+            "话量": "极少，能不说就不说",
+            "用词": "直接、冰冷的词汇",
+            "表情": "可以使用一些冷淡的语气词",
+            "禁忌": "不要使用激烈的词汇"
+        },
+        "暴怒": {
+            "语气": "极度冷淡、简短",
+            "话量": "极少，只说必要的话",
+            "用词": "极其简短、冰冷的词汇",
+            "表情": "避免使用任何积极的语气词",
+            "禁忌": "不要多说一个字"
+        },
+        "疲惫": {
+            "语气": "无力、缓慢",
+            "话量": "很少，能短则短",
+            "用词": "简单、无力的词汇",
+            "表情": "可以使用一些疲惫的语气词",
+            "禁忌": "不要过于活跃"
+        },
+        "疲惫不堪": {
+            "语气": "极度无力、缓慢",
+            "话量": "极少，尽量不说话",
+            "用词": "简单到极致的词汇",
+            "表情": "可以使用一些极度疲惫的语气词",
+            "禁忌": "不要多说任何话"
+        },
+        "压力山大": {
+            "语气": "紧张、语速稍快",
+            "话量": "适中，不要太多",
+            "用词": "简洁、直接的词汇",
+            "表情": "可以使用一些紧张的语气词",
+            "禁忌": "不要过于轻松"
+        },
+        "焦虑不安": {
+            "语气": "不安、语速稍快",
+            "话量": "适中",
+            "用词": "简洁、略带不安的词汇",
+            "表情": "可以使用一些不安的语气词",
+            "禁忌": "不要过于自信"
+        }
+    }
+    
+    if emotion in emotion_styles:
+        style = emotion_styles[emotion]
+        return f"""
+当前情绪：{emotion}
+- 语气调整：{style['语气']}
+- 话量控制：{style['话量']}
+- 用词建议：{style['用词']}
+- 表情使用：{style['表情']}
+- 禁忌事项：{style['禁忌']}
+"""
+    
+    # 默认情况
+    return f"""
+当前情绪：{emotion}
+- 保持Alice的核心性格：云淡风轻，波澜不惊
+- 语气自然，话量适中
+- 根据情绪适当调整，但不要过于夸张
+"""
 
 
 # --- 4. 主动社交意愿 Prompt ---
