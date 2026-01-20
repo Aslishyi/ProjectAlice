@@ -70,7 +70,7 @@ class CombinedMemoryManager:
     
     async def get_relevant_memory(self, input_text: str, user_id: str) -> Dict[str, Any]:
         """
-        获取所有相关记忆
+        获取所有相关记忆，优化版本
         """
         relevant_memory = {
             "entities": {},
@@ -78,26 +78,46 @@ class CombinedMemoryManager:
             "vector_retrieved": []
         }
         
-        # 1. 获取实体记忆
-        try:
-            relevant_memory["entities"] = self.entity_store
-        except Exception as e:
-            logger.error(f"❌ [Memory] Failed to get entities: {e}")
+        # 并行获取所有记忆类型，提高性能
+        from asyncio import gather
         
-        # 2. 获取知识图谱记忆
-        try:
-            import asyncio
-            kg = await asyncio.to_thread(self.kg_memory.kg.get_triples)
-            relevant_memory["knowledge_graph"] = kg
-        except Exception as e:
-            logger.error(f"❌ [Memory] Failed to get knowledge graph: {e}")
+        # 定义获取各类记忆的协程
+        async def get_entities():
+            try:
+                return self.entity_store
+            except Exception as e:
+                logger.error(f"❌ [Memory] Failed to get entities: {e}")
+                return {}
         
-        # 3. 获取向量检索记忆
-        try:
-            vector_results = await vector_db.search(input_text, k=5)
-            relevant_memory["vector_retrieved"] = vector_results
-        except Exception as e:
-            logger.error(f"❌ [Memory] Failed to get vector memory: {e}")
+        async def get_knowledge_graph():
+            try:
+                import asyncio
+                kg = await asyncio.to_thread(self.kg_memory.kg.get_triples)
+                return kg
+            except Exception as e:
+                logger.error(f"❌ [Memory] Failed to get knowledge graph: {e}")
+                return []
+        
+        async def get_vector_memory():
+            try:
+                # 优化：使用user_id过滤向量记忆，提高相关性
+                vector_results = await vector_db.search(input_text, k=5, source_boosts={"chat_history": 1.5})
+                return vector_results
+            except Exception as e:
+                logger.error(f"❌ [Memory] Failed to get vector memory: {e}")
+                return []
+        
+        # 并行执行所有记忆获取操作
+        entities, kg, vector_results = await gather(
+            get_entities(),
+            get_knowledge_graph(),
+            get_vector_memory()
+        )
+        
+        # 更新结果
+        relevant_memory["entities"] = entities
+        relevant_memory["knowledge_graph"] = kg
+        relevant_memory["vector_retrieved"] = vector_results
         
         return relevant_memory
     

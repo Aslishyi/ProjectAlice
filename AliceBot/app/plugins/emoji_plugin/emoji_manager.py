@@ -26,6 +26,7 @@ class EmojiInfo:
         self.created_at = datetime.now().isoformat()  # 创建时间
         self.usage_count = 0  # 使用次数
         self.last_used_at = None  # 最后使用时间
+        self.is_compressed = False  # 是否已压缩的标记
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典格式"""
@@ -39,7 +40,8 @@ class EmojiInfo:
             "category": self.category,
             "created_at": self.created_at,
             "usage_count": self.usage_count,
-            "last_used_at": self.last_used_at
+            "last_used_at": self.last_used_at,
+            "is_compressed": self.is_compressed
         }
 
     @classmethod
@@ -57,6 +59,7 @@ class EmojiInfo:
         emoji.created_at = data.get("created_at", datetime.now().isoformat())
         emoji.usage_count = data.get("usage_count", 0)
         emoji.last_used_at = data.get("last_used_at", None)
+        emoji.is_compressed = data.get("is_compressed", False)
         return emoji
 
 
@@ -164,27 +167,27 @@ class EmojiManager:
             updated_count = 0
             
             for emoji_hash, emoji in self.emojis.items():
-                if emoji.file_path and os.path.exists(emoji.file_path):
+                # 只压缩未压缩的表情包
+                if not emoji.is_compressed and emoji.file_path and os.path.exists(emoji.file_path):
                     file_ext = os.path.splitext(emoji.file_path)[1].lower()
                     
-                    # 跳过GIF图片和已经处理过的图片
-                    if file_ext != '.gif':
-                        # 读取现有图片
-                        with open(emoji.file_path, 'rb') as f:
-                            image_bytes = f.read()
-                        
-                        # 转换为base64
-                        base64_data = base64.b64encode(image_bytes).decode('utf-8')
-                        
-                        # 删除旧文件
-                        os.remove(emoji.file_path)
-                        
-                        # 重新保存（会自动压缩）
-                        new_file_path = self._save_image_to_file(base64_data, emoji_hash)
-                        if new_file_path:
-                            emoji.file_path = new_file_path
-                            updated_count += 1
-                            logger.info(f"已压缩表情包: {emoji_hash}")
+                    # 读取现有图片
+                    with open(emoji.file_path, 'rb') as f:
+                        image_bytes = f.read()
+                    
+                    # 转换为base64
+                    base64_data = base64.b64encode(image_bytes).decode('utf-8')
+                    
+                    # 删除旧文件
+                    os.remove(emoji.file_path)
+                    
+                    # 重新保存（会自动压缩）
+                    new_file_path = self._save_image_to_file(base64_data, emoji_hash)
+                    if new_file_path:
+                        emoji.file_path = new_file_path
+                        emoji.is_compressed = True  # 更新压缩标记
+                        updated_count += 1
+                        logger.info(f"已压缩表情包: {emoji_hash}")
             
             # 如果有更新，保存表情包数据
             if updated_count > 0:
@@ -468,8 +471,9 @@ class EmojiManager:
             if not file_path:
                 return False, "保存图片文件失败", None
             
-            # 创建新的表情包信息，限制情绪标签最多1个
+            # 创建新的表情包信息，限制情绪标签最多1个，并标记为已压缩
             emoji = EmojiInfo(emoji_hash, base64_data, file_path, description, emotions[:1] if emotions else [], tags, category)
+            emoji.is_compressed = True  # 新保存的图片已经过压缩
             self.emojis[emoji_hash] = emoji
             
             # 保存数据

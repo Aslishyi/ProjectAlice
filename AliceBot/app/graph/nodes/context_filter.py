@@ -328,11 +328,15 @@ async def context_filter_node(state: AgentState):
             query_type="context_filter"
         )
         
-        # 处理resp可能是字符串的情况
+        # 处理resp可能是字符串、字典或对象的情况
         if isinstance(resp, str):
             raw_content = resp.strip()
+        elif isinstance(resp, dict):
+            # 如果是字典，尝试获取content键
+            raw_content = resp.get('content', '').strip()
         else:
-            raw_content = resp.content.strip()
+            # 尝试获取content属性
+            raw_content = getattr(resp, 'content', '').strip()
 
         # 5. 使用增强的解析器解析结果
         data = _clean_and_parse_json(raw_content)

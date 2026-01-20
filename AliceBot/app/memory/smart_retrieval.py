@@ -205,11 +205,14 @@ class MemoryRetrievalTool:
             return False, str(e)
     
     async def _retrieve_person_info(self, question: str) -> str:
-        """从问题中提取人物信息并检索"""
+        """
+        从问题中提取人物信息并检索
+        """
         try:
             # 简单实现：提取问题中的所有中文人名
             # 这是一个简化的实现，实际可以使用更复杂的命名实体识别
             import re
+            import asyncio
             # 匹配中文人名（简化版）
             person_names = re.findall(r'[\u4e00-\u9fa5]{2,4}', question)
             
@@ -219,19 +222,22 @@ class MemoryRetrievalTool:
             # 去重
             unique_names = list(set(person_names))
             
-            # 检索每个人物的信息
-            person_info = []
-            for name in unique_names:
-                try:
-                    # 从关系数据库检索人物信息
-                    user_profile = await relation_db.get_user_profile_by_name(name)
-                    if user_profile:
-                        person_info.append(f"{name}: 亲密程度={user_profile.relationship.intimacy}, 熟悉程度={user_profile.relationship.familiarity}")
-                except Exception:
-                    continue
+            # 由于relation_db是通过user_id索引的，这里返回人物相关的记忆点信息
+            # 从向量数据库检索与这些人物相关的记忆
+            person_related_memory = []
             
-            if person_info:
-                return "\n".join(person_info)
+            # 并行执行多个搜索请求
+            tasks = [vector_db.search(f"{name}", k=2) for name in unique_names]
+            results = await asyncio.gather(*tasks)
+            
+            # 处理结果
+            for name, vector_results in zip(unique_names, results):
+                if vector_results:
+                    for result in vector_results:
+                        person_related_memory.append(f"关于{name}的记忆: {result}")
+            
+            if person_related_memory:
+                return "\n".join(person_related_memory)
             else:
                 return "未找到相关人物信息"
                 
@@ -254,14 +260,25 @@ class MemoryRetrievalTool:
                 "questions": []
             }
         
-        # 步骤2: 检索记忆
-        retrieved_info = []
-        for question in questions:
+        # 优化1: 限制最多生成2个检索问题，减少API调用次数
+        if len(questions) > 2:
+            questions = questions[:2]
+            logger.debug(f"[Smart Retrieval] 限制检索问题数量为: {len(questions)}")
+        
+        # 优化2: 合并所有问题为一个综合查询，减少vector search API调用次数
+        if len(questions) > 1:
+            combined_query = " ".join(questions)
+            logger.debug(f"[Smart Retrieval] 合并多个问题为综合查询: {combined_query}")
+            
+            # 步骤2: 仅使用合并后的查询进行一次检索
+            found, content = await self.retrieve_memory(combined_query, chat_history)
+            retrieved_info = [content] if found else []
+        else:
+            # 只有一个问题时，使用原方法
+            question = questions[0]
             logger.debug(f"[Smart Retrieval] 执行检索问题: {question}")
             found, content = await self.retrieve_memory(question, chat_history)
-            logger.debug(f"[Smart Retrieval] 检索结果: found={found}, content={content}")
-            if found:
-                retrieved_info.append(content)
+            retrieved_info = [content] if found else []
         
         logger.debug(f"[Smart Retrieval] 最终检索到的信息: {retrieved_info}")
         

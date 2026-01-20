@@ -49,6 +49,10 @@ class EmojiService:
         self._context_emotion_cache = {}
         # 缓存大小限制
         self._CACHE_SIZE = 1000
+        # 记录最近保存的表情包哈希值，用于避免重复发送
+        self._recently_saved_emojis = []
+        # 最近保存的表情包数量限制
+        self._MAX_RECENT_EMOJIS = 2
     
     async def is_emoji(self, image: Image.Image, file_size_kb: float) -> bool:
         """
@@ -190,6 +194,11 @@ class EmojiService:
             
             if success:
                 logger.info(f"✅ 成功保存表情包: {message}")
+                # 记录最近保存的表情包，用于避免重复发送
+                self._recently_saved_emojis.append(emoji_info.emoji_hash)
+                # 限制最近保存的表情包数量
+                if len(self._recently_saved_emojis) > self._MAX_RECENT_EMOJIS:
+                    self._recently_saved_emojis.pop(0)
                 return {
                     "success": True,
                     "message": message,
@@ -250,6 +259,10 @@ class EmojiService:
                 # 根据对话类型和亲密程度过滤表情包
                 filtered_emojis = self._filter_emojis_by_context(unique_emojis, conversation_type, intimacy_level)
                 
+                # 过滤掉最近保存的表情包，避免重复发送
+                filtered_emojis = [emoji for emoji in filtered_emojis 
+                                 if emoji.emoji_hash not in self._recently_saved_emojis]
+                
                 count = min(count, len(filtered_emojis))
                 if count > 0:
                     # 考虑使用频率，优先选择使用较少的表情包
@@ -266,6 +279,10 @@ class EmojiService:
                 unique_emojis = list({emoji.emoji_hash: emoji for emoji in fallback_emojis}.values())
                 filtered_emojis = self._filter_emojis_by_context(unique_emojis, conversation_type, intimacy_level)
                 
+                # 过滤掉最近保存的表情包，避免重复发送
+                filtered_emojis = [emoji for emoji in filtered_emojis 
+                                 if emoji.emoji_hash not in self._recently_saved_emojis]
+                
                 count = min(count, len(filtered_emojis))
                 if count > 0:
                     selected_emojis = self._select_balanced_emojis(filtered_emojis, count)
@@ -274,11 +291,26 @@ class EmojiService:
             
             # 最后兜底，随机选择但考虑对话类型
             logger.info(f"🎲 没有找到匹配的表情包，根据对话类型随机选择{count}个")
-            return self.emoji_manager.get_random_emoji(count=count)
+            
+            # 获取随机表情包并过滤掉最近保存的
+            random_emojis = self.emoji_manager.get_random_emoji(count=count * 2)  # 获取双倍数量以确保有足够的选择
+            filtered_random = [emoji for emoji in random_emojis 
+                             if emoji.emoji_hash not in self._recently_saved_emojis]
+            
+            # 确保返回正确数量
+            if filtered_random:
+                return filtered_random[:count]
+            return []
             
         except Exception as e:
             logger.error(f"❌ 选择表情包失败: {e}")
-            return self.emoji_manager.get_random_emoji(count=count) if self.emoji_manager else []
+            if self.emoji_manager:
+                # 获取随机表情包并过滤掉最近保存的
+                random_emojis = self.emoji_manager.get_random_emoji(count=count * 2)
+                filtered_random = [emoji for emoji in random_emojis 
+                                 if emoji.emoji_hash not in self._recently_saved_emojis]
+                return filtered_random[:count] if filtered_random else []
+            return []
     
     def _extract_emotions_from_context(self, context: Dict[str, Any]) -> List[str]:
         """
@@ -430,6 +462,25 @@ class EmojiService:
         
         return filtered if filtered else emojis  # 如果过滤后为空，返回原始列表
     
+    def _filter_recent_emojis(self, emojis: List[EmojiInfo]) -> List[EmojiInfo]:
+        """
+        过滤掉最近保存的表情包，避免重复发送
+        
+        Args:
+            emojis: 表情包列表
+            
+        Returns:
+            List[EmojiInfo]: 过滤后的表情包列表
+        """
+        if not self._recently_saved_emojis:
+            return emojis
+        
+        # 过滤掉最近保存的表情包
+        filtered = [emoji for emoji in emojis if emoji.emoji_hash not in self._recently_saved_emojis]
+        
+        # 如果过滤后没有表情包，返回原始列表（避免空列表）
+        return filtered if filtered else emojis
+    
     def _select_balanced_emojis(self, emojis: List[EmojiInfo], count: int) -> List[EmojiInfo]:
         """
         平衡选择表情包，考虑使用频率
@@ -441,13 +492,19 @@ class EmojiService:
         Returns:
             List[EmojiInfo]: 选择的表情包列表
         """
-        # 简单实现：随机选择但尝试避免重复使用
-        if len(emojis) <= count:
-            return emojis
+        # 过滤掉最近保存的表情包
+        filtered_emojis = self._filter_recent_emojis(emojis)
+        
+        # 如果过滤后没有表情包，返回原始列表
+        if not filtered_emojis:
+            filtered_emojis = emojis
+        
+        if len(filtered_emojis) <= count:
+            return filtered_emojis
         
         # 假设emoji对象有usage_count属性记录使用次数
         # 这里使用随机选择，实际可以根据使用频率加权
-        return random.sample(emojis, count)
+        return random.sample(filtered_emojis, count)
     
     def get_default_emoji(self) -> str:
         """
