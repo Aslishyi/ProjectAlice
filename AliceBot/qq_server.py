@@ -995,14 +995,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ Failed to initialize Persona Vector Store: {e}")
 
-    # 🚀 启动主动任务循环
-    proactive_task = asyncio.create_task(bot_manager.run_proactive_check())
+    # 🚀 启动主动任务循环（如果启用）
+    proactive_task = None
+    if enable_proactive:
+        proactive_task = asyncio.create_task(bot_manager.run_proactive_check())
+        logger.info("✅ Proactive Mode Enabled: Will check for conversation opportunities.")
+    else:
+        logger.info("ℹ️  Proactive Mode Disabled: Will only respond to user messages.")
 
     logger.info("✅ System Started (Reactive + Proactive + Persona Vector Store).")
     yield
 
     # 停止
-    proactive_task.cancel()
+    if proactive_task:
+        proactive_task.cancel()
     
     # 关闭插件系统
     shutdown_count = await plugin_manager.shutdown_plugins()
@@ -1085,13 +1091,21 @@ async def onebot_endpoint(websocket: WebSocket):
 import os
 import argparse
 
+# 全局变量，控制是否启用主动回复功能
+enable_proactive = True
+
+
 if __name__ == "__main__":
     # 解析命令行参数
     parser = argparse.ArgumentParser(description="ProjectAlice QQ Server")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="服务器主机地址")
     parser.add_argument("--port", type=int, default=6199, help="服务器端口")
     parser.add_argument("--workers", type=int, default=1, help="工作进程数，默认根据CPU核心数自动调整")
+    parser.add_argument("--no-proactive", action="store_true", help="关闭主动回复功能")
     args = parser.parse_args()
+    
+    # 设置全局变量
+    enable_proactive = not args.no_proactive
     
     # 验证主机地址，确保使用有效的IP或0.0.0.0
     import socket
@@ -1113,7 +1127,7 @@ if __name__ == "__main__":
     
     # 启动Uvicorn服务器
     uvicorn.run(
-        "qq_server:app",
+        app,
         host=valid_host,
         port=args.port,
         workers=args.workers,
