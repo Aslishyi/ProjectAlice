@@ -4,6 +4,9 @@
 该模块使用 LangGraph 构建 ProjectAlice 聊天机器人的完整工作流程，
 包括响应式回复和主动发起对话两种模式，以及各节点之间的路由逻辑。
 """
+from app.core.state import AgentState
+
+
 from langgraph.graph import StateGraph, END
 from app.core.state import AgentState
 
@@ -88,7 +91,7 @@ def build_graph():
     Returns:
         StateGraph: 编译后的工作流程图
     """
-    workflow = StateGraph(AgentState)
+    workflow = StateGraph[AgentState, None, AgentState, AgentState](AgentState)
 
     # 添加节点
     workflow.add_node("filter", context_filter_node)            # 上下文过滤器

@@ -192,7 +192,7 @@ async def memory_saver_node(state: AgentState):
         state: 代理状态
         
     Returns:
-        dict: 空字典
+        dict: 包含原始状态的字典，确保messages字段被保留
     """
     msgs = state.get("messages", [])
     
@@ -202,4 +202,5 @@ async def memory_saver_node(state: AgentState):
     
     await extract_and_save_memories(msgs, real_user_id, user_nickname)
     
-    return {}
+    # 返回原始状态，确保messages字段被保留
+    return state

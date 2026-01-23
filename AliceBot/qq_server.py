@@ -383,16 +383,20 @@ class QQBotManager:
             text = re.sub(pattern, replacement, text)
         return text
 
-    # --- 核心逻辑 1: 处理 Graph 输出 (复用) ---
+    # 修改 qq_server.py 文件中的 handle_graph_output 函数
     async def handle_graph_output(self, inputs: dict, self_id: str, msg_type: str, group_id: str, user_qq: str):
         """
         统一处理 Graph 的流式输出，无论是 Reactive 还是 Proactive
         """
         try:
+            # 添加去重机制，避免重复发送相同的回复
+            sent_messages = set()
+            
             async for output in self.graph.astream(inputs):
                 for node_name, node_val in output.items():
-                    # 🚀 关键修改：监听 agent 和 proactive 两个节点的输出
-                    if node_name in ["agent", "proactive"]:
+                    # 🚀 关键修改：监听 agent、proactive 和 saver 三个节点的输出
+                    # saver 节点包含工具执行完成后的最终回复
+                    if node_name in ["agent", "proactive", "saver"]:
 
                         # 检查 proactive 是否决定沉默
                         if node_name == "proactive" and node_val.get("next_step") == "silent":
@@ -408,12 +412,16 @@ class QQBotManager:
                                 target = int(group_id) if msg_type == "group" else int(user_qq)
                                 # 使用file:///协议格式，确保OneBot客户端能正确识别本地文件路径
                                 img_cq = f'[CQ:image,file=file:///{emoji_reply}]'
-                                logger.info(f"📷 发送表情包回复: {emoji_reply}")
-                                await self.send_msg(self_id, msg_type, target, img_cq)
                                 
-                                # 更新最后活跃时间
-                                session_key = f"{msg_type}_{target}"
-                                await session_manager.update_activity(session_key, msg_type, str(target), self_id)
+                                # 检查是否已经发送过相同的表情包
+                                if img_cq not in sent_messages:
+                                    logger.info(f"📷 发送表情包回复: {emoji_reply}")
+                                    await self.send_msg(self_id, msg_type, target, img_cq)
+                                    sent_messages.add(img_cq)
+                                    
+                                    # 更新最后活跃时间
+                                    session_key = f"{msg_type}_{target}"
+                                    await session_manager.update_activity(session_key, msg_type, str(target), self_id)
                                 continue
                             except Exception as e:
                                 logger.error(f"❌ 处理表情包回复失败: {e}")
@@ -452,37 +460,45 @@ class QQBotManager:
                                 
                                 target = int(group_id) if msg_type == "group" else int(user_qq)
                                 
-                                if emoji_matches:
-                                    emoji_manager = get_emoji_manager()
-                                    if emoji_manager:
-                                        # 分离文字内容和表情包
-                                        text_content = re.sub(emoji_pattern, '', final_content).strip()
-                                        
-                                        # 先发送文字消息（如果有）
-                                        if text_content:
-                                            await self.send_msg(self_id, msg_type, target, text_content)
-                                        
-                                        # 然后分开发送每个表情包
-                                        for emoji_hash in emoji_matches:
-                                            try:
-                                                emoji_info = emoji_manager.get_emoji(emoji_hash)
-                                                if emoji_info and emoji_info.file_path:
-                                                    # 使用本地文件路径生成CQ码，避免base64数据过长
-                                                    img_path = emoji_info.file_path
-                                                    # 使用file:///协议格式，确保OneBot客户端能正确识别本地文件路径
-                                                    img_cq = f'[CQ:image,file=file:///{img_path}]'
-                                                    logger.info(f"📷 发送表情包: {emoji_hash} -> 文件路径: {img_path}")
-                                                    await self.send_msg(self_id, msg_type, target, img_cq)
-                                            except Exception as e:
-                                                logger.error(f"❌ 处理表情包失败: {e}")
-                                else:
-                                    # 如果没有表情包，直接发送文字消息
-                                    if final_content.strip():
-                                        await self.send_msg(self_id, msg_type, target, final_content)
+                                # 检查是否已经发送过相同的回复
+                                if final_content not in sent_messages:
+                                    if emoji_matches:
+                                        emoji_manager = get_emoji_manager()
+                                        if emoji_manager:
+                                            # 分离文字内容和表情包
+                                            text_content = re.sub(emoji_pattern, '', final_content).strip()
+                                            
+                                            # 先发送文字消息（如果有）
+                                            if text_content:
+                                                if text_content not in sent_messages:
+                                                    await self.send_msg(self_id, msg_type, target, text_content)
+                                                    sent_messages.add(text_content)
+                                            
+                                            # 然后分开发送每个表情包
+                                            for emoji_hash in emoji_matches:
+                                                try:
+                                                    emoji_info = emoji_manager.get_emoji(emoji_hash)
+                                                    if emoji_info and emoji_info.file_path:
+                                                        # 使用本地文件路径生成CQ码，避免base64数据过长
+                                                        img_path = emoji_info.file_path
+                                                        # 使用file:///协议格式，确保OneBot客户端能正确识别本地文件路径
+                                                        img_cq = f'[CQ:image,file=file:///{img_path}]'
+                                                        if img_cq not in sent_messages:
+                                                            logger.info(f"📷 发送表情包: {emoji_hash} -> 文件路径: {img_path}")
+                                                            await self.send_msg(self_id, msg_type, target, img_cq)
+                                                            sent_messages.add(img_cq)
+                                                except Exception as e:
+                                                    logger.error(f"❌ 处理表情包失败: {e}")
+                                    else:
+                                        # 如果没有表情包，直接发送文字消息
+                                        if final_content.strip():
+                                            logger.info(f"🗣️ [Reply] -> {target}: {final_content[:50]}...")
+                                            await self.send_msg(self_id, msg_type, target, final_content)
+                                            sent_messages.add(final_content)
 
-                                # 更新最后活跃时间，防止 Proactive 刚说完又触发 Proactive
-                                session_key = f"{msg_type}_{target}"
-                                await session_manager.update_activity(session_key, msg_type, str(target), self_id)
+                                    # 更新最后活跃时间，防止 Proactive 刚说完又触发 Proactive
+                                    session_key = f"{msg_type}_{target}"
+                                    await session_manager.update_activity(session_key, msg_type, str(target), self_id)
 
                             except ValueError:
                                 pass
